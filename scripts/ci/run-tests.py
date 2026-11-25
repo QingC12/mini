@@ -11,6 +11,12 @@ import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[2]
 os.chdir(ROOT)
+# A compiler invoked by its absolute toolchain path does not always infer the
+# host SDK (unlike xcrun). Never let the iOS device SDK leak into host tests.
+if sys.platform == 'darwin' and shutil.which('xcrun'):
+    os.environ['SDKROOT'] = subprocess.check_output(['xcrun', '--sdk', 'macosx', '--show-sdk-path'], text=True).strip()
+    os.environ['MACOSX_DEPLOYMENT_TARGET'] = '14.0'
+    print('Host-test SDK: ' + os.environ['SDKROOT'], flush=True)
 OUT = Path(os.environ.get('CI_OUTPUT_DIR', ROOT / 'build/ci'))
 (OUT / 'logs').mkdir(parents=True, exist_ok=True)
 (OUT / 'reports').mkdir(parents=True, exist_ok=True)

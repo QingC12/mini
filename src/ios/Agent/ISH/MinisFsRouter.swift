@@ -37,7 +37,7 @@ final class MinisFsRouter: @unchecked Sendable {
     private let storageBindings: ContinuationStorageBindings
 
     private init() {
-        self.minisBaseURL = AIChatViewModel.minisPersistentBase
+        self.minisBaseURL = AIChatViewModel.minisPersistentBase.standardizedFileURL.resolvingSymlinksInPath()
         self.storageBindings = .registry(at: AIChatViewModel.minisPersistentBase)
     }
 

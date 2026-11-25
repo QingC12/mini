@@ -49,7 +49,7 @@ struct RouterTestFailure: Error { let message: String }
         try check("zero context retains legacy routing", ISHKernel.shared.forward?("/var/minis/workspace/file", 0) == nil)
         if mode == "normal" {
             for bucket in ["workspace", "offloads", "attachments", "browser"] {
-                let expected = base.appendingPathComponent(source).appendingPathComponent(bucket).appendingPathComponent("file").path
+                let expected = base.resolvingSymlinksInPath().appendingPathComponent(source).appendingPathComponent(bucket).appendingPathComponent("file").path
                 try check("\(bucket) forward routes to shared physical owner", ISHKernel.shared.forward?("/var/minis/\(bucket)/file", context) == expected)
                 try check("\(bucket) direct Swift URL uses the same owner", router.hostURL(forGuest: "/var/minis/\(bucket)/file", sid: destination)?.path == expected)
             }
