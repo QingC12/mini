@@ -105,20 +105,23 @@ struct NativeContinuationPolicyTests {
 }
 #else
 // Compatibility with `swift NativeContinuationPolicyTests.swift` and the
-// repository's Standalone runner, which interprets one file at a time.
-let root = URL(fileURLWithPath: #filePath)
-    .deletingLastPathComponent().deletingLastPathComponent()
-    .deletingLastPathComponent().deletingLastPathComponent()
-    .deletingLastPathComponent()
-let runner = Process()
-runner.executableURL = URL(fileURLWithPath: "/bin/sh")
-runner.arguments = [root.appendingPathComponent("tests/run_native_continuation_tests.sh").path]
-do {
-    try runner.run()
-    runner.waitUntilExit()
-    exit(runner.terminationStatus)
-} catch {
-    print("❌ Could not launch Swift test entry: \(error)")
-    exit(1)
-}
+// repository's Standalone runner. Keep expressions inside an initializer:
+// Swift parses inactive branches too when -parse-as-library is requested.
+let nativeContinuationStandaloneAdapter: Void = {
+    let root = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent().deletingLastPathComponent()
+        .deletingLastPathComponent().deletingLastPathComponent()
+        .deletingLastPathComponent()
+    let runner = Process()
+    runner.executableURL = URL(fileURLWithPath: "/bin/sh")
+    runner.arguments = [root.appendingPathComponent("tests/run_native_continuation_tests.sh").path]
+    do {
+        try runner.run()
+        runner.waitUntilExit()
+        exit(runner.terminationStatus)
+    } catch {
+        print("❌ Could not launch Swift test entry: \(error)")
+        exit(1)
+    }
+}()
 #endif
