@@ -11,7 +11,7 @@ permissions:
 
 concurrency:
   group: ios-ipa-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   quick-tests:
@@ -41,14 +41,13 @@ jobs:
 
   ios-ipa:
     needs: quick-tests
-    name: arm64 / Xcode 26.2 / no signing identity
-    runs-on: macos-26
+    name: arm64 / Xcode 26.2+ / no signing identity
+    runs-on: macos-latest
     timeout-minutes: 180
     defaults:
       run:
         shell: bash
     env:
-      DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
       GOTOOLCHAIN: local
       CI_OUTPUT_DIR: ${{ github.workspace }}/build/ci
       HOMEBREW_NO_AUTO_UPDATE: '1'
@@ -141,6 +140,12 @@ jobs:
           retention-days: 14
           compression-level: 0
 
+      - name: Publish build outcome and collect configure failure logs
+        if: always()
+        env:
+          BUILD_JOB_STATUS: ${{ job.status }}
+        run: python3 scripts/ci/summary.py
+
       - name: Upload tests, Xcode result bundle and failure logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -152,9 +157,3 @@ jobs:
             build/ci/*.xcresult
           if-no-files-found: warn
           retention-days: 14
-
-      - name: Publish build outcome
-        if: always()
-        env:
-          BUILD_JOB_STATUS: ${{ job.status }}
-        run: python3 scripts/ci/summary.py

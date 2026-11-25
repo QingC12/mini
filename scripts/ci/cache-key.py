@@ -12,11 +12,14 @@ os.chdir(ROOT)
 def output(*command):
     return subprocess.check_output(command, text=True).strip()
 inputs = {}
-for directory in ('scripts/ci', 'deps/rclone-mobile', 'deps/ffmpeg-patch', 'deps/lame-3.100', 'deps/aot'):
+for directory in ('deps/rclone-mobile', 'deps/ffmpeg-patch', 'deps/lame-3.100', 'deps/aot'):
     for path in sorted((ROOT / directory).rglob('*')):
         if path.is_file() and '.git' not in path.parts and '__pycache__' not in path.parts:
             inputs[str(path.relative_to(ROOT))] = hashlib.sha256(path.read_bytes()).hexdigest()
-for path in [ROOT / '.gitmodules', ROOT / '.github/workflows/ios-ipa.yml',
+native_scripts = ('setup-macos.sh', 'build-deps.sh', 'prepare-deps.py',
+                  'verify-deps.py', 'deps-lock.json', 'cache-key.py')
+for path in [ROOT / '.gitmodules',
+             *(ROOT / 'scripts/ci' / name for name in native_scripts),
              *sorted((ROOT / 'deps').glob('*.sh'))]:
     inputs[str(path.relative_to(ROOT))] = hashlib.sha256(path.read_bytes()).hexdigest()
 tools = {name: output(*command) for name, command in {

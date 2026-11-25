@@ -60,7 +60,12 @@ with tempfile.TemporaryDirectory(prefix='minis-upstream-tree-') as tmp:
         modules(destination)
         git('submodule', 'update', '--init', '--recursive', '--depth=1', cwd=destination)
         recursive = git('submodule', 'status', '--recursive', cwd=destination)
-        assert all(line.startswith(' ') for line in recursive.splitlines()), recursive
+        for line in recursive.splitlines():
+            # The reviewed iSH .gitmodules marks Linux update=none: it is not
+            # needed by the iOS kernel/fakefs build and must not clone a huge
+            # optional Linux tree. Every materialized submodule must be exact.
+            skipped_linux = path == 'deps/ish' and line.startswith('-') and line.split()[1] == 'deps/linux'
+            assert line.startswith(' ') or skipped_linux, recursive
         # Audit all materialized nested .gitmodules, not just the first level.
         for manifest in destination.rglob('.gitmodules'):
             if '.git' not in manifest.relative_to(destination).parts:
