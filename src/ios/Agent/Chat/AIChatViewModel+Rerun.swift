@@ -232,6 +232,7 @@ extension AIChatViewModel {
     /// — covered for both cases since `isProcessing = true` is set below and
     /// `messages.last` is the prepared assistant in each case.
     private func launchRerunAgentLoop(label: String, resumeAt: Int? = nil, resumeBlocks: Int? = nil) {
+        ContinuationCoordinator.shared.userBeganRequest(sessionId)
         AppLogger(category: "RetryDiag").info("[RetryDiag] launchRerunAgentLoop called label=\(label) resumeAt=\(resumeAt.map(String.init) ?? "nil") resumeBlocks=\(resumeBlocks.map(String.init) ?? "nil") messagesCount=\(self.messages.count)")
         errorMessage = nil
         // Clear interrupt badge on the last assistant message if present

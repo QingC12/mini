@@ -64,6 +64,9 @@ enum SessionStorageCleanup {
     static func removeSessionDirectory(_ sessionId: String, minisBase: URL,
                                        fm: FileManager = .default) -> Bool {
         guard isSessionDirectoryName(sessionId) else { return false }
+        // Clear-files/orphan cleanup is NOT session deletion. Never sever a
+        // live storage reference or follow an alias into another chat's files.
+        guard !ContinuationStorageBindings.registry(at: minisBase).registered(sessionId) else { return false }
         let dir = directory(for: sessionId, minisBase: minisBase)
         guard fm.fileExists(atPath: dir.path) else { return false }
         do {
@@ -72,6 +75,22 @@ enum SessionStorageCleanup {
         } catch {
             return false
         }
+    }
+
+    /// Call only AFTER deleting the session row/stopping its writers. Unlike
+    /// clear-files, this removes one ownership reference, preserving a physical
+    /// task root until its last continuation member is deleted.
+    @discardableResult
+    static func releaseDeletedSession(_ sessionId: String, minisBase: URL) throws -> Bool {
+        guard isSessionDirectoryName(sessionId) else { return false }
+        return try ContinuationStorageBindings.registry(at: minisBase).releaseDeletedSession(sessionId)
+    }
+
+    /// Exact integration entry for ChatStore's successful DELETE boundary.
+    /// Throws instead of treating a failed ownership write as successful cleanup.
+    @discardableResult
+    static func completeDeletion(_ sessionId: String, minisBase: URL) throws -> Bool {
+        try releaseDeletedSession(sessionId, minisBase: minisBase)
     }
 
     // MARK: Orphaned session directories  [T-storage-orphan-cleanup]
@@ -149,9 +168,13 @@ enum SessionStorageCleanup {
                                            grace: TimeInterval = orphanGracePeriod,
                                            fm: FileManager = .default) -> OrphanScan {
         let inUseUpper = Set(inUse.map { $0.uppercased() })
+        // A physical owner may no longer have a chat row while a continuation
+        // still references it. A corrupt manifest protects all roots.
+        guard let protected = ContinuationStorageBindings.registry(at: minisBase).protectedRootIDs() else { return OrphanScan() }
+        let protectedUpper = Set(protected.map { $0.uppercased() })
         var scan = OrphanScan()
         for name in names where isOrphanDirectoryName(name, knownSessionIds: knownSessionIds) {
-            guard !inUseUpper.contains(name.uppercased()) else { continue }
+            guard !inUseUpper.contains(name.uppercased()), !protectedUpper.contains(name.uppercased()) else { continue }
             let dir = directory(for: name, minisBase: minisBase)
             // Gone since the listing: nothing to do, and nothing to report.
             guard fm.fileExists(atPath: dir.path) else { continue }

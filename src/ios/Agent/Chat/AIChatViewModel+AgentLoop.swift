@@ -88,9 +88,13 @@ extension AIChatViewModel {
     }
 
     func runAgentLoop(resumingAt existingMsgIdx: Int? = nil, committedBlocks: Int? = nil) async throws {
+        let continuationAttemptID = UUID().uuidString
         do {
             try await runAgentLoopCore(resumingAt: existingMsgIdx, committedBlocks: committedBlocks)
         } catch {
+            if let llmError = error as? LLMError, case .conversationTurnLimit(let failure) = llmError {
+                await ContinuationCoordinator.shared.stage(source: self, attemptID: continuationAttemptID, failure: failure)
+            }
             // [T-ctx-measure-outbound] A context-length rejection is the one
             // ground truth that our size estimate was too low (a borrowed ratio
             // after a model switch, a stale one on a legacy session, content the
@@ -1676,6 +1680,10 @@ extension AIChatViewModel {
             assistantMessage.reasoningEcho = streamResult.reasoningEcho
             let assistantAgentIdx = agentHistory.count
             agentHistory.append(assistantMessage)
+
+            if !streamResult.isStreamInterrupted {
+                await ContinuationCoordinator.shared.providerResponded(in: sessionId)
+            }
 
             // Snapshot state for cache keep-alive warmup requests.
             // Phase B: must use effectiveAgentHistory so the keep-alive prefix matches

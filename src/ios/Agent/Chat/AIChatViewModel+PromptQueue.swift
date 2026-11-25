@@ -21,6 +21,17 @@ import os.log
 private let logger = AppLogger(category: "AIChatVM")
 
 extension AIChatViewModel {
+    /// Remove only queue items already committed into the successor's durable seed.
+    /// A prompt arriving later keeps its identity and stays visible for inspection.
+    func acceptContinuationHandoff(promptIDs: Set<UUID>) {
+        guard !promptIDs.isEmpty else { return }
+        promptQueue.removeAll { promptIDs.contains($0.id) }
+        silentQueuedPromptIds.subtract(promptIDs)
+        messages.removeAll { message in
+            message.queuedPromptId.map(promptIDs.contains) == true
+        }
+    }
+
     /// Resume queue processing after the user stopped the current task.
     /// Spawns a fresh Task (not cancelled) so the drain loop can call runAgentLoop().
     func resumeQueueAfterCancel() {
@@ -86,6 +97,7 @@ extension AIChatViewModel {
     /// The isProcessing didSet calls this on the flip; callers may also call it
     /// directly. Mirrors resumeQueueAfterCancel minus the cancel bookkeeping.
     func startDrainIfIdle(reason: String) {
+        guard !ContinuationCoordinator.shared.hasPendingHandoff(for: sessionId) else { return }
         guard remoteDeviceId == nil else { return }
         guard !isProcessing, !isDrainingQueue, !isCompacting, !postCompactDrainPending else {
             logger.info("📨[DRAIN] startDrainIfIdle(\(reason)) skipped — isProcessing=\(self.isProcessing) draining=\(self.isDrainingQueue) compacting=\(self.isCompacting) postCompactPending=\(self.postCompactDrainPending)")
@@ -137,6 +149,7 @@ extension AIChatViewModel {
     /// `internal` (not `private`) so `compactAndSend` in the +Compaction
     /// extension file can drain through this same path after a compact.
     func drainQueuedPrompts() async {
+        guard !ContinuationCoordinator.shared.hasPendingHandoff(for: sessionId) else { return }
         guard !self.isDrainingQueue else {
             logger.info("📨[DRAIN] Already draining in another task — skipping duplicate drain")
             // [T-queue-drain-handover] Remember the request. The task holding
@@ -169,6 +182,7 @@ extension AIChatViewModel {
     /// gates cross-Task duplicate entry, which all goes through the wrapper.
     private func drainQueuedPromptsInner() async {
         while !self.userDidCancel && !self.promptQueue.isEmpty {
+            guard !ContinuationCoordinator.shared.hasPendingHandoff(for: sessionId) else { break }
             // If the Task itself is cancelled (e.g. user tapped stop), don't
             // consume queue items — resumeQueueAfterCancel() handles them
             // in a fresh Task.

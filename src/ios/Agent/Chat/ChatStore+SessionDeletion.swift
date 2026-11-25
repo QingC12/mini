@@ -268,6 +268,13 @@ extension ChatStore {
     }
 
     private func deleteSessionLocalRowsOnly(_ id: String) {
+        // Pause the non-owning recovery links before removing either endpoint.
+        do { try pauseContinuationsForDeletedSession(id) }
+        catch {
+            logger.error("[Continuation] Could not journal session deletion; keeping local rows.")
+            return
+        }
+        Task { @MainActor in ContinuationCoordinator.shared.userStopped(id) }
         // [T-ios-listsessions-cache] Invalidate here (the low-level row delete)
         // so ALL callers are covered — deleteSession AND deleteSessionLocalOnly.
         // FULL: removes a row from the set.
@@ -290,17 +297,32 @@ extension ChatStore {
         }
         deleteMessages(sessionId: id)
         deleteCompactMarkers(sessionId: id)
-        deleteSessionMedia(id)
-        SessionStorageCleanup.removeSessionDirectory(id, minisBase: minisBaseURL)
-        BrowserTabPool.deletePersistedData(for: id)
 
         let sql = "DELETE FROM sessions WHERE id = ?"
         var stmt: OpaquePointer?
+        var rowDeleted = false
         if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
             sqlite3_bind_text(stmt, 1, (id as NSString).utf8String, -1, nil)
-            sqlite3_step(stmt)
+            rowDeleted = sqlite3_step(stmt) == SQLITE_DONE
         }
         sqlite3_finalize(stmt)
+        guard rowDeleted else { return }
+        BrowserTabPool.deletePersistedData(for: id)
+        let storageBase = minisBaseURL
+        Task { @MainActor in
+            // Stop the deleted endpoint first; retained continuation members
+            // still own the same physical files, even if the source row is gone.
+            ViewModelCache.shared.get(for: id)?.cancel()
+            do {
+                let stillExists = try await ChatStore.shared.continuationSessionExists(id)
+                guard !stillExists else { return }
+                _ = try await Task.detached(priority: .utility) {
+                    try SessionStorageCleanup.releaseDeletedSession(id, minisBase: storageBase)
+                }.value
+            } catch {
+                // Keep files on ambiguous deletion/journal failure, never guess.
+            }
+        }
         // Clean up per-session etag cache
         if #available(iOS 17.0, *) {
             Task { @MainActor in CloudSyncEngine.shared.removeSessionCache(id) }

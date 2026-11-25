@@ -81,6 +81,7 @@ extension AIChatView {
         VStack(spacing: 0) {
             if let sid = vm.sessionId {
                 ScheduledTaskBanner(sessionId: sid)
+                NativeContinuationBanner(sessionID: sid)
             }
             // [T-in-chat-search] Right under the navigation bar (below the
             // scheduled-task banner when the chat has one).

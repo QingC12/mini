@@ -73,6 +73,8 @@ extension AIChatViewModel {
             return
         }
 
+        if usingComposer { ContinuationCoordinator.shared.userBeganRequest(sessionId) }
+
         // Don't stop TTS here — let the previous reply finish playing. The stream
         // handler will clear the queue on the FIRST textDelta of the new reply, so
         // the old audio plays until actual new content starts arriving.
@@ -532,6 +534,7 @@ extension AIChatViewModel {
             // Concurrency gate: wait for a processing slot
             guard let slotLease = await self.acquireSessionSlot(sid) else { return }
             defer { SessionConcurrencyManager.shared.release(slotLease) }
+            guard !Task.isCancelled, !self.turnWasStopped else { return }
 
             do {
                 try await self.runAgentLoop()
@@ -615,6 +618,7 @@ extension AIChatViewModel {
         settlePendingStop(before: "retry")  // [T-stop-cleanup-before-new-turn]
         guard !isProcessing else { return }
         guard let lastMsg = messages.last, lastMsg.role == .assistant else { return }
+        ContinuationCoordinator.shared.userBeganRequest(sessionId)
 
         // [T-ios-retry-keyboard] This turn exists because the user re-sent an
         // old failure, so its completion must not be treated as "a reply
@@ -740,8 +744,10 @@ extension AIChatViewModel {
             guard let self else { return }
 
             while self.kernelStatus == .booting {
+                guard !Task.isCancelled, !self.turnWasStopped else { return }
                 try? await Task.sleep(nanoseconds: 100_000_000)
             }
+            guard !Task.isCancelled, !self.turnWasStopped else { return }
             if case .failed(let msg) = self.kernelStatus {
                 self.errorMessage = "Kernel not available: \(msg)"
                 self.isProcessing = false
@@ -753,6 +759,7 @@ extension AIChatViewModel {
             let retrySid = self.sessionId ?? "unknown"
             guard let slotLease = await self.acquireSessionSlot(retrySid) else { return }
             defer { SessionConcurrencyManager.shared.release(slotLease) }
+            guard !Task.isCancelled, !self.turnWasStopped else { return }
 
             do {
                 try await self.runAgentLoop(resumingAt: existingMsgIdx, committedBlocks: existingBlockCount)
@@ -810,6 +817,7 @@ extension AIChatViewModel {
     func resume() {
         settlePendingStop(before: "resume")  // [T-stop-cleanup-before-new-turn]
         guard !isProcessing, canResume else { return }
+        ContinuationCoordinator.shared.userBeganRequest(sessionId)
         // [T-ios-orphan-user-tail GH#262/#263] A tail of "user turn with no
         // reply at all" has no assistant row to resume INTO — the reply never
         // reached the store, so loadSession rebuilt the transcript ending on
@@ -885,8 +893,10 @@ extension AIChatViewModel {
             guard let self else { return }
 
             while self.kernelStatus == .booting {
+                guard !Task.isCancelled, !self.turnWasStopped else { return }
                 try? await Task.sleep(nanoseconds: 100_000_000)
             }
+            guard !Task.isCancelled, !self.turnWasStopped else { return }
             if case .failed(let msg) = self.kernelStatus {
                 self.errorMessage = "Kernel not available: \(msg)"
                 self.isProcessing = false
@@ -897,6 +907,7 @@ extension AIChatViewModel {
             let resumeSid = self.sessionId ?? "unknown"
             guard let slotLease = await self.acquireSessionSlot(resumeSid) else { return }
             defer { SessionConcurrencyManager.shared.release(slotLease) }
+            guard !Task.isCancelled, !self.turnWasStopped else { return }
 
             do {
                 try await self.runAgentLoop(resumingAt: existingMsgIdx, committedBlocks: existingBlockCount)
@@ -978,7 +989,9 @@ extension AIChatViewModel {
     /// [T-user-ask-notsent-retry] `afterHiddenNudge`: the turn to answer is a
     /// hidden user row the caller just appended to agentHistory (the user_ask
     /// Retry), so the visible transcript ends on the assistant instead.
-    func resumeUnansweredUserTurn(afterHiddenNudge: Bool = false) {
+    func resumeUnansweredUserTurn(afterHiddenNudge: Bool = false, forContinuation: Bool = false) {
+        guard !isProcessing, !isCompacting, remoteDeviceId == nil else { return }
+        if !forContinuation { ContinuationCoordinator.shared.userBeganRequest(sessionId) }
         settlePendingStop(before: "resumeUnansweredUserTurn")  // [T-stop-cleanup-before-new-turn]
         if !afterHiddenNudge {
             guard let lastUser = messages.last, lastUser.role == .user else { return }
@@ -1008,8 +1021,10 @@ extension AIChatViewModel {
             guard let self else { return }
 
             while self.kernelStatus == .booting {
+                guard !Task.isCancelled, !self.turnWasStopped else { return }
                 try? await Task.sleep(nanoseconds: 100_000_000)
             }
+            guard !Task.isCancelled, !self.turnWasStopped else { return }
             if case .failed(let msg) = self.kernelStatus {
                 self.errorMessage = "Kernel not available: \(msg)"
                 self.isProcessing = false
@@ -1020,6 +1035,7 @@ extension AIChatViewModel {
             let sid = self.sessionId ?? "unknown"
             guard let slotLease = await self.acquireSessionSlot(sid) else { return }
             defer { SessionConcurrencyManager.shared.release(slotLease) }
+            guard !Task.isCancelled, !self.turnWasStopped else { return }
 
             do {
                 try await self.runAgentLoop()

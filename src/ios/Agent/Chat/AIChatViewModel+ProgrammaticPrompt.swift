@@ -38,6 +38,8 @@ enum ProgrammaticPromptOrigin: Equatable {
     /// [T-user-ask-deferred] The user's answer to a deferred user_ask card,
     /// sent as their next message. The user is there: with the app in the
     /// foreground the run that answers it can ask again normally.
+    /// A durable provider-limit handoff, never ordinary chat text.
+    case continuation(recoveryID: String)
     case userAskAnswer
 
     var logLabel: String {
@@ -45,6 +47,7 @@ enum ProgrammaticPromptOrigin: Equatable {
         case .cli: return "cli"
         case .shortcut: return "shortcut"
         case .job(let id): return "job:\(id.prefix(8))"
+        case .continuation(let id): return "continuation:\(id.prefix(8))"
         case .userAskAnswer: return "user_ask_answer"
         }
     }
@@ -116,6 +119,21 @@ extension AIChatViewModel {
             // drained. Refuse rather than guess.
             logger.warning("\(tag) REJECTED — session is compacting")
             return .rejected(reason: "session_compacting")
+        }
+
+        if !isProcessing {
+            switch origin {
+            case .cli, .shortcut, .userAskAnswer:
+                ContinuationCoordinator.shared.userBeganRequest(sessionId)
+            case .job:
+                // A scheduled/helper callback must not silently restart the old
+                // task after ownership has moved. Its caller gets a real refusal.
+                if ContinuationCoordinator.shared.hasPendingHandoff(for: sessionId) {
+                    return .rejected(reason: "continuation_in_progress")
+                }
+            case .continuation:
+                break
+            }
         }
 
         // [T-programmatic-prompt-no-composer] The prompt travels as an

@@ -1633,7 +1633,7 @@ extension AIChatViewModel {
         if error is CancellationError { return false }
         if let llm = error as? LLMError {
             switch llm {
-            case .cancelled, .networkError:
+            case .cancelled, .networkError, .conversationTurnLimit:
                 return false
             case .rateLimited, .invalidAPIKey:
                 // [T-ios-compact-model-fallback] Quota / auth exhaustion is not

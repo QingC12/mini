@@ -51,6 +51,12 @@ cases = [
     ('conversation-turn-limit', [swift, 'src/ios/MinisTests/Standalone/ConversationTurnLimitTests.swift']),
     ('production-swift-syntax-only', [swiftc or 'swiftc', '-frontend', '-parse', '-swift-version', '6', *paths]),
 ]
+for name, path in (
+    ('continuation-storage', 'tests/run_continuation_storage_tests.sh'),
+    ('continuation-reliability', 'tests/run_continuation_reliability_tests.sh'),
+):
+    if (ROOT / path).is_file():
+        cases.append((name, ['sh', path]))
 suite = ET.Element('testsuite', name='Minis standalone Swift', tests=str(len(cases)))
 failures = 0
 summary = []

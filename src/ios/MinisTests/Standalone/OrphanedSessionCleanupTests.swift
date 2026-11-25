@@ -190,7 +190,9 @@ func run(_ exe: String, _ args: [String]) -> (Int32, String) {
     p.waitUntilExit()
     return (p.terminationStatus, String(decoding: data, as: UTF8.self))
 }
-let (cc, ccOut) = run("/usr/bin/xcrun", ["swiftc", supportFile.path, mainFile.path, "-o", bin.path])
+let bindingFile = tmp.appendingPathComponent("bindings.swift")
+try source("Agent/Chat/ContinuationStorageBindings.swift").write(to: bindingFile, atomically: true, encoding: .utf8)
+let (cc, ccOut) = run("/usr/bin/xcrun", ["swiftc", supportFile.path, bindingFile.path, mainFile.path, "-o", bin.path])
 check("shipping SessionDeletionSupport.swift compiles standalone", cc == 0)
 if cc != 0 { print(ccOut); exit(1) }
 let (rc, outText) = run(bin.path, [])

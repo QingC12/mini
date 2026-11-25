@@ -619,6 +619,15 @@
 		RCL000119 /* BackupHistoryDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = RCL000219 /* BackupHistoryDetailView.swift */; };
 		RCL000120 /* BackupCategoryIcon.swift in Sources */ = {isa = PBXBuildFile; fileRef = RCL000220 /* BackupCategoryIcon.swift */; };
 		RCL000121 /* BackupHUD.swift in Sources */ = {isa = PBXBuildFile; fileRef = RCL000221 /* BackupHUD.swift */; };
+		DAE6496DDD90F21D2D233459 /* ConversationTurnLimit.swift in Sources */ = {isa = PBXBuildFile; fileRef = 478408D5D4E7DDF6620075CA /* ConversationTurnLimit.swift */; };
+		81E5809E16A231AFF1930028 /* ContinuationPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 008754A25C91EF1A15BFF856 /* ContinuationPolicy.swift */; };
+		A8F756348A4CC5137321F53C /* ContinuationRecord.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6A43B154F7D6656CB74EF137 /* ContinuationRecord.swift */; };
+		F8579D8F468FEE269D288986 /* ChatStore+Continuation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 05270D6EC875F36B6619F164 /* ChatStore+Continuation.swift */; };
+		112D517D15A0DBD162472DC2 /* ContinuationCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF236CCD6C89A9AF31AD1A6D /* ContinuationCoordinator.swift */; };
+		3BC0DA001441ACD336575889 /* ContinuationWorkspace.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7A155610FD349470F197B07 /* ContinuationWorkspace.swift */; };
+		96AF4A737A6DCA22BA36FA3E /* ContinuationSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F20FDCF8E45EA56AD6F36C0 /* ContinuationSettings.swift */; };
+		6E12B24DBCDB3E4396B74C1C /* NativeContinuationBanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5450B4D959C4A5FE2FADF552 /* NativeContinuationBanner.swift */; };
+		5C604C2E8156FDDF74DF2CCB /* ContinuationStorageBindings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 388646B5E4B3CD0DF255339C /* ContinuationStorageBindings.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -1441,6 +1450,15 @@
 		RCL000219 /* BackupHistoryDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackupHistoryDetailView.swift; sourceTree = "<group>"; };
 		RCL000220 /* BackupCategoryIcon.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackupCategoryIcon.swift; sourceTree = "<group>"; };
 		RCL000221 /* BackupHUD.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackupHUD.swift; sourceTree = "<group>"; };
+		478408D5D4E7DDF6620075CA /* ConversationTurnLimit.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Providers/ConversationTurnLimit.swift"; sourceTree = SOURCE_ROOT; };
+		008754A25C91EF1A15BFF856 /* ContinuationPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Agent/Chat/ContinuationPolicy.swift"; sourceTree = SOURCE_ROOT; };
+		6A43B154F7D6656CB74EF137 /* ContinuationRecord.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Agent/Chat/ContinuationRecord.swift"; sourceTree = SOURCE_ROOT; };
+		05270D6EC875F36B6619F164 /* ChatStore+Continuation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Agent/Chat/ChatStore+Continuation.swift"; sourceTree = SOURCE_ROOT; };
+		FF236CCD6C89A9AF31AD1A6D /* ContinuationCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Agent/Chat/ContinuationCoordinator.swift"; sourceTree = SOURCE_ROOT; };
+		D7A155610FD349470F197B07 /* ContinuationWorkspace.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Agent/Chat/ContinuationWorkspace.swift"; sourceTree = SOURCE_ROOT; };
+		9F20FDCF8E45EA56AD6F36C0 /* ContinuationSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Agent/Chat/ContinuationSettings.swift"; sourceTree = SOURCE_ROOT; };
+		5450B4D959C4A5FE2FADF552 /* NativeContinuationBanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Views/Chat/NativeContinuationBanner.swift"; sourceTree = SOURCE_ROOT; };
+		388646B5E4B3CD0DF255339C /* ContinuationStorageBindings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Agent/Chat/ContinuationStorageBindings.swift"; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -2379,6 +2397,15 @@
 				E5VMC0016 /* AIChatViewModel+BackgroundTask.swift */,
 				E5VMC0017 /* AIChatViewModel+ConcurrentTools.swift */,
 				E53000014 /* ChatStore.swift */,
+				388646B5E4B3CD0DF255339C /* ContinuationStorageBindings.swift */,
+				5450B4D959C4A5FE2FADF552 /* NativeContinuationBanner.swift */,
+				9F20FDCF8E45EA56AD6F36C0 /* ContinuationSettings.swift */,
+				D7A155610FD349470F197B07 /* ContinuationWorkspace.swift */,
+				FF236CCD6C89A9AF31AD1A6D /* ContinuationCoordinator.swift */,
+				05270D6EC875F36B6619F164 /* ChatStore+Continuation.swift */,
+				6A43B154F7D6656CB74EF137 /* ContinuationRecord.swift */,
+				008754A25C91EF1A15BFF856 /* ContinuationPolicy.swift */,
+				478408D5D4E7DDF6620075CA /* ConversationTurnLimit.swift */,
 				E5CSSPL001R /* ChatStore+Schema.swift */,
 				E5CSSPL002R /* ChatStore+SessionCRUD.swift */,
 				E5CSSPL003R /* ChatStore+SessionList.swift */,
@@ -3137,6 +3164,15 @@
 				E5SHV0004 /* MountDetailView.swift in Sources */,
 				E52000001 /* LLMTypes.swift in Sources */,
 				E52000002 /* LLMError.swift in Sources */,
+				5C604C2E8156FDDF74DF2CCB /* ContinuationStorageBindings.swift in Sources */,
+				6E12B24DBCDB3E4396B74C1C /* NativeContinuationBanner.swift in Sources */,
+				96AF4A737A6DCA22BA36FA3E /* ContinuationSettings.swift in Sources */,
+				3BC0DA001441ACD336575889 /* ContinuationWorkspace.swift in Sources */,
+				112D517D15A0DBD162472DC2 /* ContinuationCoordinator.swift in Sources */,
+				F8579D8F468FEE269D288986 /* ChatStore+Continuation.swift in Sources */,
+				A8F756348A4CC5137321F53C /* ContinuationRecord.swift in Sources */,
+				81E5809E16A231AFF1930028 /* ContinuationPolicy.swift in Sources */,
+				DAE6496DDD90F21D2D233459 /* ConversationTurnLimit.swift in Sources */,
 				E52000003 /* LLMProvider.swift in Sources */,
 				E5F00001 /* LLMProviderFactory.swift in Sources */,
 				E52000004 /* AnthropicProvider.swift in Sources */,

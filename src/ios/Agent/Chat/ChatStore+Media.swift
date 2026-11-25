@@ -73,6 +73,9 @@ extension ChatStore {
 
     /// Delete all media for a session.
     func deleteSessionMedia(_ sessionId: String) {
+        // Continuation members share one physical task root. The final session
+        // deletion releases ownership; clearing one chat must not erase peers.
+        guard !ContinuationStorageBindings.registry(at: minisBaseURL).registered(sessionId) else { return }
         let fm = FileManager.default
 
         // [T-paste-mediaref] "pasted" holds pasted-text refs; it must be here

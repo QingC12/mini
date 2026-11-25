@@ -34,9 +34,11 @@ final class MinisFsRouter: @unchecked Sendable {
 
     /// Host base URL (~/Library/MinisChat/minis). Captured once at install time.
     private let minisBaseURL: URL
+    private let storageBindings: ContinuationStorageBindings
 
     private init() {
         self.minisBaseURL = AIChatViewModel.minisPersistentBase
+        self.storageBindings = .registry(at: AIChatViewModel.minisPersistentBase)
     }
 
     /// Allocate a stable fs_context token for `sid`. Repeated calls with the
@@ -104,8 +106,11 @@ final class MinisFsRouter: @unchecked Sendable {
                 continue
             }
             let tail = String(guestPath[prefixEnd...])
+            // Continuation has its own conversation/context token, but the
+            // task's physical root is shared with still-running guest jobs.
+            let rootID = storageBindings.rootID(for: sid) ?? sid
             return minisBaseURL
-                .appendingPathComponent(sid, isDirectory: true)
+                .appendingPathComponent(rootID, isDirectory: true)
                 .appendingPathComponent(bucket.hostSubdir, isDirectory: true)
                 .path + tail
         }
@@ -136,8 +141,13 @@ final class MinisFsRouter: @unchecked Sendable {
         // would be reverse-translated even when <X> is a stale or unrelated
         // directory — harmless today but masks the cause of bugs.
         lock.lock()
-        let known = sidToContext[sidPart] != nil
+        let issued = Array(sidToContext.keys)
         lock.unlock()
+        // F_GETPATH resolves destination aliases to the physical owner. After
+        // restart only the NEW conversation may have issued a context token.
+        let known = issued.contains(sidPart) || issued.contains {
+            storageBindings.rootID(for: $0) == sidPart
+        }
         guard known else { return nil }
         guard let bucket = perSessionBuckets.first(where: { $0.hostSubdir == bucketName })
         else { return nil }

@@ -481,6 +481,7 @@ final class SessionConcurrencyManager: ObservableObject {
     func release(_ lease: SessionSlotLease) {
         guard lease.holdsSlot else { return }
         releaseSlot(sessionId: lease.sessionId)
+        ContinuationCoordinator.shared.sessionReleased(lease.sessionId)
     }
 
     /// Acquire a processing slot. Returns immediately if under limit, otherwise suspends until a slot opens.
