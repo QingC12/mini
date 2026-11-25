@@ -108,7 +108,14 @@ final class MinisFsRouter: @unchecked Sendable {
             let tail = String(guestPath[prefixEnd...])
             // Continuation has its own conversation/context token, but the
             // task's physical root is shared with still-running guest jobs.
-            let rootID = storageBindings.rootID(for: sid) ?? sid
+            guard let rootID = storageBindings.rootID(for: sid) else {
+                // nil from the hook means FALL THROUGH to legacy mounts, not
+                // an I/O failure. A corrupt ownership map must neither guess
+                // sid nor fall through into another session's active mount.
+                // Keep this constant: appending an untrusted '..' tail could
+                // normalize away /dev/null and accidentally authorize a path.
+                return "/dev/null/minis-continuation-storage-unavailable"
+            }
             return minisBaseURL
                 .appendingPathComponent(rootID, isDirectory: true)
                 .appendingPathComponent(bucket.hostSubdir, isDirectory: true)

@@ -54,6 +54,7 @@ cases = [
 for name, path in (
     ('continuation-storage', 'tests/run_continuation_storage_tests.sh'),
     ('continuation-reliability', 'tests/run_continuation_reliability_tests.sh'),
+    ('continuation-router', 'tests/run_continuation_router_tests.sh'),
 ):
     if (ROOT / path).is_file():
         cases.append((name, ['sh', path]))
