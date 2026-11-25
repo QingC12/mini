@@ -214,6 +214,8 @@ struct AppearanceSettingsView: View {
     /// task. Read by ChatSendButton through `StopConfirmPolicy.settingsKey`;
     /// [T-stop-mode-longpress] OFF by default, also set from the stop button's long-press.
     @AppStorage(StopConfirmPolicy.settingsKey) private var confirmBeforeStopping: Bool = StopConfirmPolicy.defaultValue
+    /// Native continuation is opt-in and shares the config API's storage key.
+    @AppStorage(ContinuationPolicy.settingsKey) private var autoContinueOnTurnLimit: Bool = ContinuationPolicy.defaultValue
     /// [T-thinking-auto-expand-toggle] When true (default, historical
     /// behavior) a NEW streaming thinking block auto-expands while reasoning
     /// streams. When false it stays collapsed until tapped. Read at
@@ -347,6 +349,17 @@ struct AppearanceSettingsView: View {
                 Text("Confirm Before Stopping")
             } footer: {
                 Text("Ask for confirmation when you tap the stop button while a task is running, so an accidental tap does not end a long run. Off by default. You can also long-press the stop button to switch.")
+            }
+
+            Section {
+                Toggle(AppLocalized("会话轮次上限后自动新建并续接任务"), isOn: $autoContinueOnTurnLimit)
+                    .onChange(of: autoContinueOnTurnLimit) { _ in
+                        ContinuationCoordinator.shared.policyChanged()
+                    }
+            } header: {
+                Text("会话续接")
+            } footer: {
+                Text("默认关闭。仅在服务商明确返回会话轮次上限错误时触发，不按消息数量判断；连续失败达到 \(ContinuationPolicy.maxConsecutiveFailures) 次后停止自动续接。可随时关闭，关闭后不再自动新建续接会话。")
             }
 
             Section {

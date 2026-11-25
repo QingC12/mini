@@ -341,6 +341,9 @@ final class OpenAIAgentProvider: AgentProvider {
 
                         // Check for error in SSE stream (OpenRouter / proxy providers)
                         if let error = event["error"] as? [String: Any] {
+                            if let failure = ConversationTurnLimitDetector.fromSSEEvent(event) {
+                                throw LLMError.conversationTurnLimit(failure)
+                            }
                             let message = error["message"] as? String ?? "Unknown streaming error"
                             let code = error["code"] as? Int
                             logger.error("SSE stream error: \(message)")
@@ -895,7 +898,18 @@ final class OpenAIAgentProvider: AgentProvider {
                                 continuation.yield(.contentBlockStart(.toolUse(id: combinedId, name: name)))
                             }
 
+                        case "error":
+                            if let failure = ConversationTurnLimitDetector.fromSSEEvent(event) {
+                                throw LLMError.conversationTurnLimit(failure)
+                            }
+                            // Other top-level error events keep their existing
+                            // behavior; only the precise turn ceiling is new.
+                            break
+
                         case "response.failed":
+                            if let failure = ConversationTurnLimitDetector.fromSSEEvent(event) {
+                                throw LLMError.conversationTurnLimit(failure)
+                            }
                             // [T-responses-terminal-events] Explicit terminal
                             // handling instead of the generic fallthrough: pull
                             // the structured error off the response object so

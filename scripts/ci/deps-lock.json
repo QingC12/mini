@@ -1,0 +1,42 @@
+{
+  "upstream": {
+    "url": "https://github.com/OpenMinis/OpenMinis.git",
+    "commit": "1a71df0f381cefde80bf912b723de6f9831bc177"
+  },
+  "submodules": [
+    {
+      "path": "deps/ish",
+      "url": "https://github.com/OpenMinis/ish-arm64.git",
+      "commit": "0fd17a135e78b7a0cf08a4f5831217bbb76ed22f"
+    },
+    {
+      "path": "deps/proot",
+      "url": "https://github.com/OpenMinis/proot.git",
+      "commit": "8b31a69345730692f2f49a88694fdcaec78b2031"
+    }
+  ],
+  "downloads": [
+    {
+      "url": "https://ffmpeg.org/releases/ffmpeg-6.1.2.tar.xz",
+      "path": "deps/.cache/ffmpeg-6.1.2.tar.xz",
+      "sha256": "3b624649725ecdc565c903ca6643d41f33bd49239922e45c9b1442c63dca4e38"
+    },
+    {
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/aarch64/alpine-minirootfs-3.21.0-aarch64.tar.gz",
+      "path": "deps/.cache/alpine-minirootfs-3.21.0-aarch64.tar.gz",
+      "sha256": "f31202c4070c4ef7de9e157e1bd01cb4da3a2150035d74ea5372c5e86f1efac1"
+    }
+  ],
+  "swift_packages": [
+    {"identity": "realtimecutvadlibrary", "url": "https://github.com/helloooideeeeea/RealTimeCutVADLibrary.git", "version": "1.0.14", "revision": "b059608836a055dc0ce74ca2d0eeb19fc54cb7d4"},
+    {"identity": "swiftanthropic", "url": "https://github.com/jamesrochabrun/SwiftAnthropic", "version": "2.2.0", "revision": "4f9e21b94e491138003903ff6c14ab4f04b6ba6c"},
+    {"identity": "swift-cmark", "url": "https://github.com/swiftlang/swift-cmark", "version": "0.7.1", "revision": "5d9bdaa4228b381639fff09403e39a04926e2dbe"},
+    {"identity": "swiftmath", "url": "https://github.com/mgriebling/SwiftMath", "version": "1.7.3", "revision": "fa8244ed032f4a1ade4cb0571bf87d2f1a9fd2d7"}
+  ],
+  "audited_upstream_binary": {
+    "name": "RealTimeCutVADCXXLibrary",
+    "url": "https://github.com/helloooideeeeea/RealTimeCutVADLibraryForXCFramework/releases/download/v1.0.3/RealTimeCutVADCXXLibrary.xcframework.zip",
+    "sha256": "00c4a8cd5a22e634f34d744eb06aa88a4494e12a5f9d4573989129a1f4c7e76d",
+    "note": "Existing upstream SwiftPM binaryTarget, NOT a source-built dependency. No unknown binary URL is allowed. See README.md for the explicit all-source limitation."
+  }
+}

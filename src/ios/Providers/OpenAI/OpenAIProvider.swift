@@ -2309,6 +2309,10 @@ final class OpenAIProvider: LLMProvider {
             return .transientError(message: "HTTP \(statusCode): \(body.prefix(200))", statusCode: statusCode)
         }
 
+        if let failure = ConversationTurnLimitDetector.fromHTTPError(statusCode: statusCode, body: body) {
+            return .conversationTurnLimit(failure)
+        }
+
         // Try to extract error message from JSON body
         if let data = body.data(using: .utf8),
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],

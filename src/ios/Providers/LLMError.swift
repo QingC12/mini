@@ -4,6 +4,9 @@ enum LLMError: LocalizedError {
     case invalidAPIKey(detail: String = "")
     case networkError(underlying: Error)
     case providerError(message: String)
+    /// A conversation-local provider turn ceiling. Never retry/fallback in the
+    /// same conversation; the agent boundary coordinates a separate continuation.
+    case conversationTurnLimit(ConversationTurnLimitFailure)
     /// Transient server-side errors (HTTP 500/502/503/504/529) that should be
     /// retried on the same model rather than triggering a group fallback.
     ///
@@ -27,6 +30,11 @@ enum LLMError: LocalizedError {
             return "Network error: \(error.localizedDescription)"
         case .providerError(let message):
             return "Provider error: \(message)"
+        case .conversationTurnLimit(let failure):
+            // Keep raw upstream text in the structured payload, not automatic
+            // error-description logs (a relay can echo sensitive request data).
+            if let limit = failure.limit { return "Conversation model turn limit reached (\(limit) turns)" }
+            return "Conversation model turn limit reached"
         case .transientError(let message, _):
             return "Service temporarily unavailable: \(message)"
         case .decodingError(let error):
@@ -51,7 +59,7 @@ enum LLMError: LocalizedError {
         switch self {
         case .networkError, .transientError:
             return true
-        case .invalidAPIKey, .providerError, .decodingError, .rateLimited, .cancelled, .unknown:
+        case .invalidAPIKey, .providerError, .conversationTurnLimit, .decodingError, .rateLimited, .cancelled, .unknown:
             return false
         }
     }
@@ -66,6 +74,7 @@ enum LLMError: LocalizedError {
         switch self {
         case .rateLimited: return "Rate limited"
         case .invalidAPIKey: return "Invalid API key"
+        case .conversationTurnLimit: return "Conversation model turn limit reached"
         case .providerError(let msg): return "Provider error: \(String(msg.prefix(60)))"
         default: return "Error"
         }
@@ -75,7 +84,7 @@ enum LLMError: LocalizedError {
         switch self {
         case .rateLimited, .invalidAPIKey, .providerError:
             return true
-        case .transientError, .networkError, .decodingError, .cancelled, .unknown:
+        case .transientError, .networkError, .conversationTurnLimit, .decodingError, .cancelled, .unknown:
             return false
         }
     }
@@ -83,8 +92,11 @@ enum LLMError: LocalizedError {
     /// [T-fallback-503-budget] The HTTP status this error was mapped from, when
     /// the mapping site had one. nil for every non-HTTP condition.
     var httpStatusCode: Int? {
-        if case .transientError(_, let code) = self { return code }
-        return nil
+        switch self {
+        case .transientError(_, let code): return code
+        case .conversationTurnLimit(let failure): return failure.statusCode
+        default: return nil
+        }
     }
 
     /// A transient error the SERVER produced with a 5xx status — i.e. this
@@ -92,6 +104,7 @@ enum LLMError: LocalizedError {
     /// may well have. Distinct from a local/link transient (nil status), where
     /// switching models fixes nothing.
     var isServerCapacityTransient: Bool {
+        guard case .transientError = self else { return false }
         guard let code = httpStatusCode else { return false }
         return (500...599).contains(code)
     }

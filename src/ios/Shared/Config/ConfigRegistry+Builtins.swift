@@ -1361,6 +1361,15 @@ extension ConfigRegistry {
             userDefaultsKey: StopConfirmPolicy.settingsKey,
             defaultValue: StopConfirmPolicy.defaultValue
         ))
+        // [T-native-continuation] Opt-in only; the coordinator must first
+        // classify a real provider turn-limit failure, never a local count.
+        r.register(AppStorageBoolField(
+            path: "chat.autoContinueOnTurnLimit",
+            displayName: "会话轮次上限后自动新建并续接任务",
+            description: "Off by default. Only after a real provider turn-limit error, automatically create a new conversation and continue the task. Never inferred from local message counts. Stops after 3 consecutive failures; turn this off to prevent further automatic continuation.",
+            userDefaultsKey: ContinuationPolicy.settingsKey,
+            defaultValue: ContinuationPolicy.defaultValue
+        ))
         r.register(AppStorageBoolField(
             path: "chat.fabOnLeft",
             displayName: "FAB on left",
