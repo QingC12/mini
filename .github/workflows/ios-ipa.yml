@@ -1,0 +1,160 @@
+name: iOS device IPA (unsigned)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-ipa-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quick-tests:
+    name: Standalone Swift tests and production syntax (no native deps)
+    runs-on: macos-latest
+    timeout-minutes: 15
+    env:
+      CI_OUTPUT_DIR: ${{ github.workspace }}/build/ci
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          submodules: false
+          persist-credentials: false
+      - name: Run actual Swift tests and parse changed production sources
+        run: python3 scripts/ci/run-tests.py
+      - name: Upload quick-test reports even on failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: swift-quick-tests-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build/ci/logs
+            build/ci/reports
+          if-no-files-found: warn
+          retention-days: 14
+
+  ios-ipa:
+    needs: quick-tests
+    name: arm64 / Xcode 26.2 / no signing identity
+    runs-on: macos-26
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: bash
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
+      GOTOOLCHAIN: local
+      CI_OUTPUT_DIR: ${{ github.workspace }}/build/ci
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+      HOMEBREW_NO_INSTALL_CLEANUP: '1'
+    steps:
+      - name: Check out source (gitlinks restored explicitly below)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          submodules: false
+          persist-credentials: false
+
+      - name: Install Go matching the checked-in module
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.5'
+          check-latest: false
+          cache: true
+          cache-dependency-path: deps/rclone-mobile/go.sum
+
+      - name: Select and verify macOS toolchains
+        run: |
+          mkdir -p "$CI_OUTPUT_DIR/logs" "$CI_OUTPUT_DIR/reports"
+          set -o pipefail
+          bash scripts/ci/setup-macos.sh 2>&1 | tee "$CI_OUTPUT_DIR/logs/setup.log"
+
+      - name: Restore exact upstream submodules (also handles source archives)
+        run: |
+          set -o pipefail
+          python3 scripts/ci/prepare-deps.py 2>&1 | tee "$CI_OUTPUT_DIR/logs/source-provenance.log"
+
+      - name: Run real native continuation Swift tests
+        run: python3 scripts/ci/run-tests.py
+
+      - name: Compute native cache identity
+        id: native-key
+        run: python3 scripts/ci/cache-key.py
+
+      - name: Restore source-built native artifacts (exact key only)
+        id: native-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            deps/lame-build
+            deps/libs
+            deps/include
+            deps/frameworks
+            deps/resources
+          key: ${{ steps.native-key.outputs.key }}
+
+      - name: Build LAME, FFmpeg, iSH, Alpine fakefs and rclone
+        if: steps.native-cache.outputs.cache-hit != 'true'
+        run: |
+          set -o pipefail
+          bash scripts/ci/build-deps.sh 2>&1 | tee "$CI_OUTPUT_DIR/logs/deps.log"
+
+      - name: Validate dependency outputs including cache hits
+        run: |
+          set -o pipefail
+          python3 scripts/ci/verify-deps.py 2>&1 | tee "$CI_OUTPUT_DIR/logs/verify-deps.log"
+
+      - name: Save source-built native artifacts
+        if: steps.native-cache.outputs.cache-hit != 'true' && github.event_name != 'pull_request'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            deps/lame-build
+            deps/libs
+            deps/include
+            deps/frameworks
+            deps/resources
+          key: ${{ steps.native-key.outputs.key }}
+
+      - name: Compile real iOS device app and package unsigned IPA
+        run: |
+          set -o pipefail
+          bash scripts/ci/build-ipa.sh 2>&1 | tee "$CI_OUTPUT_DIR/logs/ipa.log"
+
+      - name: Upload verified unsigned IPA with SHA256 and provenance
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Minis-unsigned-arm64-${{ github.sha }}
+          path: |
+            build/ci/artifacts/Minis-unsigned.ipa
+            build/ci/artifacts/SHA256SUMS
+            build/ci/artifacts/BUILD-INFO.json
+            build/ci/artifacts/UNSIGNED-NOT-INSTALLABLE.txt
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+      - name: Upload tests, Xcode result bundle and failure logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-build-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build/ci/logs
+            build/ci/reports
+            build/ci/*.xcresult
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Publish build outcome
+        if: always()
+        env:
+          BUILD_JOB_STATUS: ${{ job.status }}
+        run: python3 scripts/ci/summary.py
