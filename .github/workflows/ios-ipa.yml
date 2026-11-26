@@ -10,7 +10,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: ios-ipa-${{ github.workflow }}-${{ github.ref }}
+  # Protect every active compile, while a newer fixed SHA need not wait behind
+  # an obsolete long App build. Duplicate builds of the same SHA still serialize.
+  group: ios-ipa-${{ github.workflow }}-${{ github.sha }}
   cancel-in-progress: false
 
 jobs:
