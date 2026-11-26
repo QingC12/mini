@@ -28,7 +28,8 @@ tools = {name: output(*command) for name, command in {
     'metal': ['xcrun', '--sdk', 'iphoneos', 'metal', '--version'],
     'go': ['go', 'version'], 'meson': ['meson', '--version'],
     'ninja': ['ninja', '--version'],
-    'brew': ['brew', 'list', '--versions', 'llvm', 'libarchive', 'pkg-config', 'meson', 'ninja'],
+    'brew': ['brew', 'list', '--versions', 'llvm', 'lld', 'libarchive', 'pkg-config', 'meson', 'ninja'],
+    'lld': [str(Path(output('brew', '--prefix', 'lld')) / 'bin/ld.lld'), '--version'],
 }.items()}
 refs = {spec['path']: output('git', '-C', spec['path'], 'rev-parse', 'HEAD')
         for spec in json.loads((ROOT / 'scripts/ci/deps-lock.json').read_text())['submodules']}

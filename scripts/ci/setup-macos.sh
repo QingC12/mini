@@ -42,7 +42,23 @@ for command in (['xcodebuild', '-version'], ['xcrun', '--sdk', 'iphoneos', '--sh
     match = re.search(r'(\d+)\.(\d+)', text)
     assert match and tuple(map(int, match.groups())) >= (26, 2), text
 PY
-brew install ninja llvm libarchive pkg-config meson
+brew install ninja llvm lld libarchive pkg-config meson
+# Homebrew's llvm formula no longer supplies ld.lld. The guest VDSO is ELF,
+# so Apple's Mach-O linker cannot replace it. Add only lld (not LLVM clang)
+# to PATH, preserving Xcode clang for all host/iOS compilation.
+LLD_PREFIX="$(brew --prefix lld)"
+export PATH="$LLD_PREFIX/bin:$PATH"
+if [[ -n "${GITHUB_PATH:-}" ]]; then
+  printf '%s\n' "$LLD_PREFIX/bin" >> "$GITHUB_PATH"
+fi
+"$LLD_PREFIX/bin/ld.lld" --version
+# Fail in setup, not after minutes of LAME/FFmpeg compilation, if clang still
+# cannot find the ELF linker used by iSH's -fuse-ld=lld custom command.
+PROBE_DIR="${CI_OUTPUT_DIR:-$PWD/build/ci}/reports"
+mkdir -p "$PROBE_DIR"
+printf '%s\n' 'int minis_vdso_probe(void) { return 0; }' | \
+  "$(brew --prefix llvm)/bin/clang" -target aarch64-linux-gnu -fuse-ld=lld \
+    -nostdlib -shared -fPIC -x c - -o "$PROBE_DIR/toolchain-vdso-probe.so"
 # Do not put Homebrew LLVM before Apple's clang: host libraries use Xcode clang;
 # build_ish.sh explicitly finds Homebrew clang for the guest ELF VDSO.
 ARCHIVE_PREFIX="$(brew --prefix libarchive)"
