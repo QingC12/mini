@@ -530,6 +530,13 @@ struct AIChatView: View {
     @State var missingMinisFileName: String?
 
     var body: some View {
+        chatSceneContent
+    }
+
+    // Opaque result boundaries keep each part of the modifier chain small
+    // enough to type-check independently. These getters add no view wrappers:
+    // state, modifier order and presentation/environment scope stay unchanged.
+    private var chatPageContent: some View {
         // [T-ios-chat-body-stack-erase] Type-erase the page's content before
         // the ~80-modifier chain below. Most of those modifiers (.sheet,
         // .onChange, .onReceive, .alert, ...) return an opaque `some View`
@@ -813,6 +820,10 @@ struct AIChatView: View {
         // [T-ios-navbar-menu-baritem] Outside the equatable host on purpose:
         // its update pass is what refreshes the menu's action closures.
         .background(navBarMenuInstaller)
+    }
+
+    private var chatPromptContent: some View {
+        chatPageContent
         .sheet(item: $titlePillEditSession) { session in
             SessionEditSheet(session: session) { newTitle, newCategory in
                 Task {
@@ -969,6 +980,10 @@ struct AIChatView: View {
             Text(AppLocalized("Messages above this point will be compacted into a summary. This cannot be undone."))
         }
         .offloadPermissionDialog()
+    }
+
+    private var chatPreviewContent: some View {
+        chatPromptContent
         .environment(\.openMinisURL, OpenMinisURLAction { url in
             handleMinisURLTap(url)
         })
@@ -1007,6 +1022,10 @@ struct AIChatView: View {
         .modifier(RerunFromToolBlockListener(vm: vm))
         .modifier(ChatSearchHostModifier(search: vm.chatSearch, isActive: $isChatSearchActive,
                                          inputFocused: $inputFocused))
+    }
+
+    private var chatMediaPreviewContent: some View {
+        chatPreviewContent
         .fullScreenCover(item: $previewVideoFile) { fileURL in
             MinisVideoFullscreenPlayer(fileURL: fileURL)
         }
@@ -1096,6 +1115,10 @@ struct AIChatView: View {
                 }
             })
         }
+    }
+
+    private var chatSessionContent: some View {
+        chatMediaPreviewContent
         .sheet(isPresented: $showFileBrowser) {
             NavigationStack {
                 let base = RootfsManager.shared.dataPath
@@ -1223,6 +1246,10 @@ struct AIChatView: View {
                     }
             }
         }
+    }
+
+    private var chatAttachmentContent: some View {
+        chatSessionContent
         .fullScreenCover(isPresented: $showCamera, onDismiss: {
             minisLogger.info("[QuickAction] fullScreenCover(camera) onDismiss showCamera=\(showCamera)")
         }) {
@@ -1328,6 +1355,10 @@ struct AIChatView: View {
                 minisLogger.error("File import failed: \(error.localizedDescription)")
             }
         }
+    }
+
+    private var chatLifecycleContent: some View {
+        chatAttachmentContent
         // [T-minisurl-wrong-active-session] A draft opened from the UI has
         // sessionId nil at onAppear; when send() creates the real session,
         // adopt it as the frontmost one here — this view being mounted IS the
@@ -1578,6 +1609,10 @@ struct AIChatView: View {
             // Capsule auto-shows whenever audio is loaded — no manual activation needed.
             minisLogger.info("🔑DRAFT AIChatView.onDisappear vm=\(vm.vmInstanceId) sessionId=\(sessionId ?? "nil") draftId=\(draftId ?? "nil") vm.sessionId=\(vm.sessionId ?? "nil") vm.isProcessing=\(vm.isProcessing)")
         }
+    }
+
+    private var chatSceneContent: some View {
+        chatLifecycleContent
         // [T-voice-bg-fg-gap] Structural immunity: while the voice panel is up
         // and the transcript editor is NOT open, there is no legitimate keyboard
         // in this subtree — so ignore the keyboard safe-area entirely in that

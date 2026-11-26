@@ -562,6 +562,12 @@ struct ContentView: View {
     static let pendingBackgroundNavigationTTL: TimeInterval = 90
 
     var body: some View {
+        appRoutingContent
+    }
+
+    // Split only the expression, not the view hierarchy: the existing state,
+    // callbacks and modifier order stay on ContentView without new wrappers.
+    private var sessionEventContent: some View {
         GeometryReader { geo in
             let wide = isIPad && geo.size.width >= compactThreshold
             Group {
@@ -770,6 +776,10 @@ struct ContentView: View {
                 switchToSession(sessionId)
             }
         }
+    }
+
+    private var toolPresentationContent: some View {
+        sessionEventContent
         .fullScreenCover(isPresented: $showTerminal) {
             NavigationStack {
                 ISHTerminalView(showCloseButton: true)
@@ -977,6 +987,10 @@ struct ContentView: View {
                 .animation(.easeInOut(duration: 0.2), value: isExporting)
             }
         }
+    }
+
+    private var sessionLifecycleContent: some View {
+        toolPresentationContent
         .task {
             // [T-p1-delegate-task] Hidden child sessions never reach the
             // sidebar; they are entered from their parent's helper block.
@@ -1361,6 +1375,10 @@ struct ContentView: View {
                 }
             }
         }
+    }
+
+    private var appRoutingContent: some View {
+        sessionLifecycleContent
         .onChange(of: deepLink.showEnvironmentVariables) { show in
             if show {
                 activeToolSheet = .settings
