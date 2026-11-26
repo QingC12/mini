@@ -31,5 +31,6 @@ python3 "$ROOT/tests/continuation-stop/extract_methods.py" "$ROOT" "$TMP"
     "$ROOT/src/ios/Agent/Chat/ContinuationQueueFence.swift" \
     "$ROOT/src/ios/Agent/Chat/ContinuationCoordinator.swift" \
     "$TMP/ProductionCancel.swift" "$TMP/ProductionPromptQueue.swift" "$TMP/ProductionPostCompact.swift" \
-    "$ROOT/tests/continuation-stop/Tests.swift" -o "$TMP/ContinuationStopTests"
+    "$TMP/ProductionAgentContentPart.swift" "$TMP/ProductionRerun.swift" \
+    "$ROOT/tests/continuation-stop/Tests.swift" "$ROOT/tests/continuation-stop/RerunTests.swift" -o "$TMP/ContinuationStopTests"
 HOME="$TMP/home" "$TMP/ContinuationStopTests"

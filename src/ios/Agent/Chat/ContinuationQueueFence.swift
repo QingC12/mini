@@ -5,6 +5,9 @@ import Foundation
 /// cannot give an already-scheduled old rescue ownership of the new request.
 struct ContinuationQueueFence {
     private(set) var generation = UUID()
+    /// Unlike rescue ownership, this changes only on an explicit new request.
+    /// It lets a stopped retry finish its own cleanup, never a later request's.
+    private(set) var requestGeneration = UUID()
     private(set) var isStopped = false
     private(set) var isDeleted = false
 
@@ -20,6 +23,7 @@ struct ContinuationQueueFence {
     mutating func reopenForExplicitUserRequest() -> Bool {
         guard !isDeleted else { return false }
         generation = UUID()
+        requestGeneration = UUID()
         isStopped = false
         return true
     }

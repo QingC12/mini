@@ -12,17 +12,21 @@ let logger = AppLogger(category: "stop-tests")
 struct TokenUsage {}
 struct AttachmentMeta { var path = "" }
 struct PasteEntry { let id: Int; let text: String }
-typealias AgentContentPart = ContentPart
+typealias InputAttachment = String
 typealias MarkdownContent = String
 func prepareMarkdownForRender(_ text: String) -> String { text }
 struct AgentMessage {
     let role: MessageRole
-    let parts: [ContentPart]
+    var parts: [AgentContentPart]
     var dbMessageId: String? = nil
     var anchorId = UUID().uuidString
 }
 final class TestBlock {
-    enum Kind { case text }
+    let id = UUID()
+    var toolUseId: String?
+    enum Status { case streaming, running, cancelled, completed }
+    var toolStatus: Status = .completed
+    enum Kind { case text, tool }
     var kind: Kind = .text
     var content = ""
     var cachedMarkdown: String?
@@ -34,6 +38,8 @@ final class ChatMessage {
     var blocks: [TestBlock]
     var queuedPromptId: UUID?
     var isQueued = false
+    var awaitingHistoryEntry = false
+    var streamInterruptCount = 0
     var attachments: [AttachmentMeta] = []
     var inputAttachments: [String] = []
     var historyAnchorId: String?
@@ -72,6 +78,20 @@ extension ChatStore {
 
 @MainActor final class AIChatViewModel {
     var sessionId: String?
+    var vmInstanceId = UUID().uuidString
+    var turnStartedByRetry = false
+    var isTruncatingForRetry = false
+    var transitionSuspended = false
+    var cachedLatestMarker: Int?
+    var toolSnapshots: [ToolSnapshotItem] = []
+    var forceScrollToBottom = Signal()
+    var retrySnapshotReloadSignal = Signal()
+    var objectWillChange = Signal()
+    var kernelStatus = KernelStatus.booted
+    var slotHook: (() async -> Void)?
+    var loopHook: (() async throws -> Void)?
+    var historyCuts = 0
+    var resumeTargets: [Int?] = []
     var helperConfig: String?
     var remoteDeviceId: String?
     var isHelper: Bool { helperConfig != nil }
@@ -139,14 +159,34 @@ extension ChatStore {
     func loadSession() async {
         let rows = (try? await ChatStore.shared.continuationMessages(sessionID: sessionId!)) ?? []
         messages = rows.map { ChatMessage(id: UUID(uuidString: $0.id) ?? UUID(), role: $0.role) }
-        agentHistory = rows.map { AgentMessage(role: $0.role, parts: $0.parts) }
+        agentHistory = rows.map { row in AgentMessage(role: row.role, parts: row.parts.compactMap {
+            if case .text(let text) = $0 { return .text(text) }; return nil
+        }) }
         await Self.afterLoad?(self)
     }
     func resumeUnansweredUserTurn(forContinuation: Bool) {
         guard continuationQueueMayRun, !isProcessing else { return }
         starts += 1; toolStarts += 1; isProcessing = true
     }
-    func runAgentLoop() async throws { starts += 1; toolStarts += 1 }
+    func runAgentLoop(resumingAt: Int? = nil, committedBlocks: Int? = nil) async throws {
+        starts += 1; toolStarts += 1; resumeTargets.append(resumingAt)
+        try await loopHook?()
+    }
+    func ensureKernelBooted() {}
+    func acquireSessionSlot(_ sid: String) async -> TestSlotLease? {
+        await slotHook?(); return TestSlotLease()
+    }
+    @discardableResult
+    func cutAtUserBubble(_ idx: Int, keepBubble: Bool, site: String) -> (keptEntry: Int?, unused: Bool) {
+        historyCuts += 1
+        let end = keepBubble ? idx + 1 : idx
+        if end < messages.count { messages.removeSubrange(end...) }
+        if end < agentHistory.count { agentHistory.removeSubrange(end...) }
+        return (keepBubble ? idx : idx - 1, false)
+    }
+    func dumpHistoryPairing(_ site: String) {}
+    func buildRawMessage(_ entry: AgentMessage) async -> RawMessage? { nil }
+
     func planQueueTake(at point: QueueDeliveryPoint) -> QueueTake? {
         guard !promptQueue.isEmpty else { return nil }
         return QueueTake(deliver: promptQueue.map(\.id), coalesced: [], scheduledJobId: nil)
@@ -158,7 +198,7 @@ extension ChatStore {
     }
     func scheduledReminder(for take: QueueTake, delivered: [QueuedPrompt], at point: QueueDeliveryPoint) -> String? { nil }
     static func minisUploadsDir(for sid: String) -> URL { FileManager.default.temporaryDirectory }
-    func processAttachments(_ attachments: [String], uploadsDir: URL, nowStr: String) -> ([ContentPart], [AttachmentMeta]) {
+    func processAttachments(_ attachments: [String], uploadsDir: URL, nowStr: String) -> ([AgentContentPart], [AttachmentMeta]) {
         return (attachments.map { .text($0) }, attachments.map { AttachmentMeta(path: $0) })
     }
     static func cleanupAttachmentFiles(_ attachments: [String]) {
@@ -192,8 +232,29 @@ extension ChatStore {
     func dropPresetsOfStoppedTurn() {}
     func handleUserCancelledCleanup() { cancelCleanupCount += 1 }
     func settlePendingStop(before: String) {}
-    func finishStoppedTurn() {}
+    func finishStoppedTurn() { cancelCleanupCount += 1; userDidCancel = false; canResume = true }
     func beginBackgroundProcessing() {}
     func endBackgroundProcessing() {}
     func playCompletionHaptic() {}
+}
+
+struct ToolSnapshotItem { let id: String }
+enum KernelStatus: Equatable { case booted, booting, failed(String) }
+enum LLMError: LocalizedError {
+    case test
+    var errorDescription: String? { "test failure" }
+}
+struct TestSlotLease {}
+extension SessionConcurrencyManager {
+    func release(_ lease: TestSlotLease) {}
+}
+@MainActor enum RerunIO {
+    static var deletes = 0
+    static var updates = 0
+    static var deleteHook: (() async -> Void)?
+    static func delete() async { deletes += 1; await deleteHook?() }
+}
+extension ChatStore {
+    func deleteMessagesAfter(sessionId: String, keepCount: Int) async { await RerunIO.delete() }
+    func updateMessageParts(messageId: String, parts: [ContentPart]) async { await MainActor.run { RerunIO.updates += 1 } }
 }

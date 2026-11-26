@@ -33,6 +33,7 @@ feature_paths = [
     'Agent/Chat/ContinuationWorkspace.swift',
     'Agent/Chat/ContinuationQueueFence.swift',
     'Agent/Chat/AIChatViewModel+Cancel.swift',
+    'Agent/Chat/AIChatViewModel+Rerun.swift',
     'Agent/Chat/AIChatViewModel+Send.swift',
     'Agent/Chat/AIChatViewModel+ProgrammaticPrompt.swift',
     'Agent/Chat/AIChatViewModel+Compaction.swift',

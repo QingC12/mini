@@ -31,6 +31,12 @@ tools = {name: output(*command) for name, command in {
     'brew': ['brew', 'list', '--versions', 'llvm', 'lld', 'libarchive', 'pkg-config', 'meson', 'ninja'],
     'lld': [str(Path(output('brew', '--prefix', 'lld')) / 'bin/ld.lld'), '--version'],
 }.items()}
+# Metal is mounted from a per-run cryptex path with a random suffix. Its
+# InstalledDir is provenance, not a compiler version; hashing it guarantees
+# misses between identical runners. Preserve raw output in the report only.
+observed_metal = tools['metal']
+tools['metal'] = '\n'.join(line for line in observed_metal.splitlines()
+                           if not line.strip().startswith('InstalledDir:'))
 refs = {spec['path']: output('git', '-C', spec['path'], 'rev-parse', 'HEAD')
         for spec in json.loads((ROOT / 'scripts/ci/deps-lock.json').read_text())['submodules']}
 identity = {'schema': 1, 'arch': platform.machine(), 'macos': platform.mac_ver()[0],
@@ -41,7 +47,8 @@ digest = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest
 key = f'ios-native-v1-{platform.machine()}-{digest}'
 report = Path(os.environ.get('CI_OUTPUT_DIR', ROOT / 'build/ci')) / 'reports'
 report.mkdir(parents=True, exist_ok=True)
-(report / 'cache-identity.json').write_text(json.dumps({**identity, 'key': key}, indent=2) + '\n')
+(report / 'cache-identity.json').write_text(json.dumps({**identity, 'key': key,
+    'observed_metal_version_with_location': observed_metal}, indent=2) + '\n')
 if os.environ.get('GITHUB_OUTPUT'):
     with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
         out.write('key=' + key + '\n')

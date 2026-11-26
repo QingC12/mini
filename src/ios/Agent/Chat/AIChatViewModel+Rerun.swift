@@ -22,6 +22,7 @@ private let logger = AppLogger(category: "AIChatVM")
 
 extension AIChatViewModel {
     func retryFromMessage(_ messageId: UUID, replacementAttachments: [InputAttachment]? = nil) {
+        guard !continuationQueueFence.isDeleted, !ContinuationCoordinator.shared.isDeletedSession(sessionId) else { return }
         settlePendingStop(before: "retryFromMessage")  // [T-stop-cleanup-before-new-turn]
         guard !isProcessing else { return }
         // [T-ios-retry-keyboard] Re-running from an existing user message is a
@@ -50,6 +51,7 @@ extension AIChatViewModel {
             isTruncatingForRetry = false
             return
         }
+        guard let generation = beginExplicitRerunRequest() else { return }
         // Keep the selected user message (through the last bubble of its
         // merged group) and its entry; remove everything after. Shared locator
         // with delete and edit — see locateUserBubble.
@@ -105,19 +107,21 @@ extension AIChatViewModel {
         logger.info("[DeleteAfter] resend path: sid=\(sessionId?.prefix(8) ?? "nil") keepCount=\(persistedKeepCount) hasMarker=\(hasMarkerResend)")
         if let sessionId {
             Task { @MainActor [weak self] in
+                guard let self, self.continuationQueueMayRun(generation: generation) else { return }
                 await ChatStore.shared.deleteMessagesAfter(sessionId: sessionId, keepCount: persistedKeepCount)
+                guard self.continuationQueueMayRun(generation: generation) else { return }
                 // DB truncation done — the truncation window is closed. By now
                 // launchRerunAgentLoop has set isProcessing=true, so reloads
                 // stay suppressed through the rerun; this just releases the
                 // retry-specific guard.
-                self?.isTruncatingForRetry = false
+                self.isTruncatingForRetry = false
             }
         } else {
             isTruncatingForRetry = false
         }
 
         rebuildToolSnapshotsFromMessages()
-        launchRerunAgentLoop(label: "retryFromMessage")
+        launchRerunAgentLoop(label: "retryFromMessage", generation: generation)
     }
 
     /// [T-ios-delete-from-message] Delete a user message and everything after
@@ -136,6 +140,8 @@ extension AIChatViewModel {
     /// (`keepUpTo - 1`), so the surviving history ends on the PREVIOUS
     /// assistant turn — still a valid, self-consistent context.
     func deleteFromMessage(_ messageId: UUID) {
+        guard !continuationQueueFence.isDeleted, !ContinuationCoordinator.shared.isDeletedSession(sessionId) else { return }
+        let generation = continuationQueueFence.generation
         settlePendingStop(before: "deleteFromMessage")  // [T-stop-cleanup-before-new-turn]
         guard !isProcessing else { return }
         // Same truncation guard as retry: a deferred iCloud-sync reload landing
@@ -172,8 +178,13 @@ extension AIChatViewModel {
         let persistedKeepCount = agentHistory.count
         if let sessionId {
             Task { @MainActor [weak self] in
+                guard let self, self.continuationQueueFence.generation == generation,
+                      !self.continuationQueueFence.isDeleted,
+                      !ContinuationCoordinator.shared.isDeletedSession(sessionId) else { return }
                 await ChatStore.shared.deleteMessagesAfter(sessionId: sessionId, keepCount: persistedKeepCount)
-                self?.isTruncatingForRetry = false
+                guard self.continuationQueueFence.generation == generation,
+                      !self.continuationQueueFence.isDeleted else { return }
+                self.isTruncatingForRetry = false
             }
         } else {
             isTruncatingForRetry = false
@@ -231,8 +242,28 @@ extension AIChatViewModel {
     /// `isLast && vm.isProcessing && (!hasVisibleContent || isAwaiting…)`
     /// — covered for both cases since `isProcessing = true` is set below and
     /// `messages.last` is the prepared assistant in each case.
-    private func launchRerunAgentLoop(label: String, resumeAt: Int? = nil, resumeBlocks: Int? = nil) {
-        ContinuationCoordinator.shared.userBeganRequest(sessionId)
+    private func beginExplicitRerunRequest() -> UUID? {
+        guard !continuationQueueFence.isDeleted, !ContinuationCoordinator.shared.isDeletedSession(sessionId),
+              ContinuationCoordinator.shared.userBeganRequest(sessionId),
+              reopenContinuationQueueForExplicitUserRequest(), continuationQueueMayRun else { return nil }
+        userDidCancel = false
+        return continuationQueueFence.generation
+    }
+
+    /// Stop may finish cleanup for this request, but never touch a later owner.
+    private func rerunStillOwnsTurn(generation: UUID, requestGeneration: UUID) -> Bool {
+        if continuationQueueMayRun(generation: generation) { return true }
+        if !continuationQueueFence.isDeleted,
+           !ContinuationCoordinator.shared.isDeletedSession(sessionId),
+           continuationQueueFence.requestGeneration == requestGeneration && userDidCancel {
+            finishStoppedTurn()
+        }
+        return false
+    }
+
+    private func launchRerunAgentLoop(label: String, generation: UUID, resumeAt: Int? = nil, resumeBlocks: Int? = nil) {
+        guard continuationQueueMayRun(generation: generation) else { return }
+        let requestGeneration = continuationQueueFence.requestGeneration
         AppLogger(category: "RetryDiag").info("[RetryDiag] launchRerunAgentLoop called label=\(label) resumeAt=\(resumeAt.map(String.init) ?? "nil") resumeBlocks=\(resumeBlocks.map(String.init) ?? "nil") messagesCount=\(self.messages.count)")
         errorMessage = nil
         // Clear interrupt badge on the last assistant message if present
@@ -274,10 +305,13 @@ extension AIChatViewModel {
 
         currentTask = Task { [weak self] in
             guard let self else { return }
+            guard self.rerunStillOwnsTurn(generation: generation, requestGeneration: requestGeneration) else { return }
 
             while self.kernelStatus == .booting {
+                guard self.rerunStillOwnsTurn(generation: generation, requestGeneration: requestGeneration) else { return }
                 try? await Task.sleep(nanoseconds: 100_000_000)
             }
+            guard self.rerunStillOwnsTurn(generation: generation, requestGeneration: requestGeneration) else { return }
             if case .failed(let msg) = self.kernelStatus {
                 self.errorMessage = "Kernel not available: \(msg)"
                 self.isProcessing = false
@@ -289,13 +323,16 @@ extension AIChatViewModel {
             let retryFromSid = self.sessionId ?? "unknown"
             guard let slotLease = await self.acquireSessionSlot(retryFromSid) else { return }
             defer { SessionConcurrencyManager.shared.release(slotLease) }
+            guard self.rerunStillOwnsTurn(generation: generation, requestGeneration: requestGeneration) else { return }
 
             do {
                 try await self.runAgentLoop(resumingAt: effectiveResumeAt, committedBlocks: effectiveResumeBlocks)
             } catch is CancellationError {
+                guard self.rerunStillOwnsTurn(generation: generation, requestGeneration: requestGeneration) else { return }
                 logger.info("Agent loop cancelled (\(label))")
                 self.finishStoppedTurn()
             } catch {
+                guard self.rerunStillOwnsTurn(generation: generation, requestGeneration: requestGeneration) else { return }
                 let rawDesc = String(describing: error)
                 logger.error("Agent loop error (\(label)): \(rawDesc)")
                 if let llmErr = error as? LLMError {
@@ -326,14 +363,16 @@ extension AIChatViewModel {
                     }
                 }
             }
+            guard self.rerunStillOwnsTurn(generation: generation, requestGeneration: requestGeneration) else { return }
             if self.userDidCancel { self.handleUserCancelledCleanup() }
             // [T-stop-with-queue-render-desync] See send(): Stop's cancel() owns
             // state teardown; a superseded task must not drain or flip isProcessing.
-            guard !Task.isCancelled else {
+            guard self.continuationQueueMayRun(generation: generation) else {
                 logger.info("🔄SESSION [vm=\(self.vmInstanceId)] \(label) epilogue skipped (task cancelled) session=\(self.sessionId ?? "nil")")
                 return
             }
             await self.drainQueuedPrompts()
+            guard self.continuationQueueMayRun(generation: generation) else { return }
             logger.info("🔄SESSION [vm=\(self.vmInstanceId)] \(label) DONE session=\(self.sessionId ?? "nil")")
             self.playCompletionHaptic()
             self.isProcessing = false
@@ -356,6 +395,7 @@ extension AIChatViewModel {
     /// truncating at the preceding user message — delegate to
     /// retryFromMessage(precedingUser) and skip the sub-message rewrite.
     func retryFromToolBlock(blockId: UUID) {
+        guard !continuationQueueFence.isDeleted, !ContinuationCoordinator.shared.isDeletedSession(sessionId) else { return }
         settlePendingStop(before: "retryFromToolBlock")  // [T-stop-cleanup-before-new-turn]
         guard !isProcessing else { return }
 
@@ -378,14 +418,14 @@ extension AIChatViewModel {
             default: return true  // any earlier tool/info block counts
             }
         }
+        if !hasPrecedingContent,
+           let userIdx = messages[..<asstMsgIdx].lastIndex(where: { $0.role == .user }) {
+            logger.info("[RerunToolBlock] degenerate → retryFromMessage(precedingUser) tuId=\(targetToolUseId.prefix(12))")
+            retryFromMessage(messages[userIdx].id)
+            return
+        }
+        guard let generation = beginExplicitRerunRequest() else { return }
         if !hasPrecedingContent {
-            if let userIdx = messages[..<asstMsgIdx].lastIndex(where: { $0.role == .user }) {
-                // Normal degenerate case: a user message precedes this turn —
-                // truncate at it and re-run (existing whole-turn path).
-                logger.info("[RerunToolBlock] degenerate → retryFromMessage(precedingUser) tuId=\(targetToolUseId.prefix(12))")
-                retryFromMessage(messages[userIdx].id)
-                return
-            }
             // [T-ios-retry-double-header] No preceding user message (session
             // opens with an assistant turn — e.g. SOUL greeting / system-
             // triggered). Don't silently no-op: truncate from this assistant
@@ -419,12 +459,15 @@ extension AIChatViewModel {
             let keepCount = agentHistory.count
             logger.info("[RerunToolBlock] degenerate (no precedingUser) → truncate from assistant start tuId=\(targetToolUseId.prefix(12)) keepCount=\(keepCount)")
             if let sessionId {
-                Task { await ChatStore.shared.deleteMessagesAfter(sessionId: sessionId, keepCount: keepCount) }
+                Task { @MainActor [weak self] in
+                    guard let self, self.continuationQueueMayRun(generation: generation) else { return }
+                    await ChatStore.shared.deleteMessagesAfter(sessionId: sessionId, keepCount: keepCount)
+                }
             }
             rebuildToolSnapshotsFromMessages()
             // No resume target — a fresh assistant message is appended by the
             // agent loop (messages.last is now whatever preceded this turn).
-            launchRerunAgentLoop(label: "retryFromToolBlock")
+            launchRerunAgentLoop(label: "retryFromToolBlock", generation: generation)
             return
         }
 
@@ -526,10 +569,13 @@ extension AIChatViewModel {
             let trimmedEntry = agentHistory[entryIdx]
             let trimmedParts = trimmedEntry.parts
             let dbId = trimmedEntryDbId
-            Task {
+            Task { @MainActor [weak self] in
+                guard let self, self.continuationQueueMayRun(generation: generation) else { return }
                 await ChatStore.shared.deleteMessagesAfter(sessionId: sessionId, keepCount: persistedKeepCount)
+                guard self.continuationQueueMayRun(generation: generation) else { return }
                 if let dbId {
                     let raw = await self.buildRawMessage(trimmedEntry)
+                    guard self.continuationQueueMayRun(generation: generation) else { return }
                     await ChatStore.shared.updateMessageParts(messageId: dbId, parts: raw?.parts ?? Self.contentPartsFallback(trimmedParts))
                 }
             }
@@ -547,7 +593,7 @@ extension AIChatViewModel {
             else if case .running = block.toolStatus { block.toolStatus = .cancelled }
         }
         rebuildToolSnapshotsFromMessages()
-        launchRerunAgentLoop(label: "retryFromToolBlock", resumeAt: asstMsgIdx, resumeBlocks: blockIdx)
+        launchRerunAgentLoop(label: "retryFromToolBlock", generation: generation, resumeAt: asstMsgIdx, resumeBlocks: blockIdx)
     }
 
     /// Fallback ContentPart serialization if buildRawMessage returns nil

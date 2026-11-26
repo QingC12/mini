@@ -294,7 +294,10 @@ import Foundation
             try await testIdleAndAwaitFences()
             try await testUncancelledOldGeneration()
             try await testOldDrainCannotReleaseNewOwner()
-            print("PASS: \(assertions) assertions using exact production Cancel + complete PromptQueue + Coordinator/Store/Fence")
+            try await testRerunDeleteRestore()
+            try await testRerunSlotAndKernelFences()
+            try await testRerunPersistenceAndErrorFences()
+            print("PASS: \(assertions) assertions using exact production Cancel + complete PromptQueue/Rerun + Coordinator/Store/Fence")
         } catch {
             fputs("FAIL: \(error)\n", stderr)
             exit(1)
