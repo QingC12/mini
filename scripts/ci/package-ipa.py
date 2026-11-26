@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import plistlib
 import shutil
+import struct
 import subprocess
 import sys
 import zipfile
@@ -21,8 +22,38 @@ assert app.is_dir() and app.name == 'Minis.app', 'Real xcodebuild app output mis
 def command(*args):
     return subprocess.check_output(args, text=True, stderr=subprocess.STDOUT).strip()
 
+# This is a real deployment target, not an Info.plist-only compatibility edit.
+MINIMUM_IOS = '17.0'
+REQUIRED_DEVICE_IOS = (17, 3, 1)
+
+def ios_version(value):
+    parts = tuple(int(part) for part in value.split('.'))
+    return (parts + (0, 0, 0))[:3]
+
+def binary_compatibility(path):
+    data = path.read_bytes()
+    assert data[:4] == b'\xcf\xfa\xed\xfe', f'Not thin arm64 Mach-O: {path}'
+    _, cpu, _, _, count, size, _, _ = struct.unpack_from('<8I', data)
+    assert cpu == 0x0100000c and 32 + size <= len(data), path
+    pos = 32
+    versions = []
+    for _ in range(count):
+        cmd, length = struct.unpack_from('<II', data, pos)
+        assert length >= 8 and pos + length <= 32 + size, path
+        if cmd == 0x32:  # LC_BUILD_VERSION; SDK version is NOT the minimum OS.
+            platform, minimum, _, _ = struct.unpack_from('<4I', data, pos + 8)
+            version = (minimum >> 16, (minimum >> 8) & 255, minimum & 255)
+            assert platform == 2, f'Not iOS device: {path}'
+            assert version <= REQUIRED_DEVICE_IOS, f'Binary requires newer iOS {version}: {path}'
+            versions.append('.'.join(map(str, version)))
+        pos += length
+    assert pos == 32 + size and versions, f'Missing/invalid build version: {path}'
+    return {'path': str(path.relative_to(app)), 'minimum_ios': versions}
+
 def bundle(path):
     info = plistlib.loads((path / 'Info.plist').read_bytes())
+    if info.get('MinimumOSVersion'):
+        assert ios_version(info['MinimumOSVersion']) <= REQUIRED_DEVICE_IOS, f'Bundle requires newer iOS: {path}'
     executable = path / info['CFBundleExecutable']
     assert executable.is_file() and os.access(executable, os.X_OK), executable
     assert command('xcrun', 'lipo', '-archs', str(executable)) == 'arm64', executable
@@ -34,7 +65,20 @@ def bundle(path):
             'executable': info['CFBundleExecutable'], 'architectures': ['arm64']}
 
 bundles = [bundle(app)]
-assert plistlib.loads((app / 'Info.plist').read_bytes()).get('MinimumOSVersion') == '26.2'
+assert plistlib.loads((app / 'Info.plist').read_bytes()).get('MinimumOSVersion') == MINIMUM_IOS
+compatibility_images = []
+for path in sorted(app.rglob('*')):
+    if not path.is_file() or path.is_symlink():
+        continue
+    with path.open('rb') as stream:
+        magic = stream.read(4)
+    if magic in (b'\xcf\xfa\xed\xfe', b'\xfe\xed\xfa\xcf', b'\xca\xfe\xba\xbe', b'\xbe\xba\xfe\xca'):
+        compatibility_images.append(binary_compatibility(path))
+assert len(compatibility_images) >= 12, 'Incomplete iOS device executable set'
+(OUT / 'reports/ios17-compatibility.json').write_text(json.dumps({
+    'required_device_ios': '17.3.1', 'deployment_target': MINIMUM_IOS,
+    'images': compatibility_images, 'device_tested': False,
+}, indent=2) + '\n')
 for name in ('MinisShare.appex', 'MinisFileProvider.appex', 'AgentWidgetExtension.appex'):
     bundles.append(bundle(app / 'PlugIns' / name))
 for name in ('FFmpeg', 'libavcodec', 'libavformat', 'libavutil', 'libavfilter', 'libswresample', 'libswscale', 'RealTimeCutVADCXXLibrary'):
@@ -82,7 +126,7 @@ info = {
     'xcode': command('xcodebuild', '-version'),
     'sdk': command('xcrun', '--sdk', 'iphoneos', '--show-sdk-version'),
     'go': command('go', 'version'), 'configuration': 'Release',
-    'destination': 'generic/platform=iOS', 'architecture': 'arm64', 'minimum_ios': '26.2',
+    'destination': 'generic/platform=iOS', 'architecture': 'arm64', 'minimum_ios': '17.0',
     'signing': 'unsigned; no Apple identity or provisioning profile',
     'installable_as_is': False, 'bundles': bundles,
     'dependency_lock': json.loads((ROOT / 'scripts/ci/deps-lock.json').read_text()),
