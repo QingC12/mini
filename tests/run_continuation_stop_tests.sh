@@ -21,9 +21,14 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 mkdir -p "$TMP/modules" "$TMP/home"
 python3 "$ROOT/tests/continuation-stop/extract_methods.py" "$ROOT" "$TMP"
+python3 "$ROOT/tests/continuation-storage/extract.py" "$ROOT" "$TMP/lifecycle"
 "$COMPILER" -swift-version 5 -D CONTINUATION_STOP_TESTS -parse-as-library -module-cache-path "$TMP/modules" \
     "$ROOT/tests/continuation-reliability/Fixtures.swift" \
     "$ROOT/tests/continuation-stop/Adapters.swift" \
+    "$ROOT/tests/continuation-stop/LifecycleAdapters.swift" \
+    "$ROOT/src/ios/Agent/Chat/ContinuationStorageBindings.swift" \
+    "$ROOT/src/ios/Agent/Chat/SessionDeletionSupport.swift" \
+    "$TMP/lifecycle/Workspace.swift" "$TMP/lifecycle/Restore.swift" "$TMP/lifecycle/Deletion.swift" \
     "$ROOT/src/ios/Providers/ConversationTurnLimit.swift" \
     "$ROOT/src/ios/Agent/Chat/ContinuationPolicy.swift" \
     "$ROOT/src/ios/Agent/Chat/ContinuationRecord.swift" \
@@ -32,5 +37,6 @@ python3 "$ROOT/tests/continuation-stop/extract_methods.py" "$ROOT" "$TMP"
     "$ROOT/src/ios/Agent/Chat/ContinuationCoordinator.swift" \
     "$TMP/ProductionCancel.swift" "$TMP/ProductionPromptQueue.swift" "$TMP/ProductionPostCompact.swift" \
     "$TMP/ProductionAgentContentPart.swift" "$TMP/ProductionRerun.swift" \
-    "$ROOT/tests/continuation-stop/Tests.swift" "$ROOT/tests/continuation-stop/RerunTests.swift" -o "$TMP/ContinuationStopTests"
+    "$ROOT/tests/continuation-stop/Tests.swift" "$ROOT/tests/continuation-stop/RerunTests.swift" \
+    "$ROOT/tests/continuation-stop/LifecycleTests.swift" -o "$TMP/ContinuationStopTests"
 HOME="$TMP/home" "$TMP/ContinuationStopTests"

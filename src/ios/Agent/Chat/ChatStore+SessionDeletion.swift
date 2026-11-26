@@ -268,6 +268,12 @@ extension ChatStore {
     }
 
     private func deleteSessionLocalRowsOnly(_ id: String) {
+        let storageRegistry = ContinuationStorageBindings.registry(at: minisBaseURL)
+        // Reserve BEFORE the first SQL mutation, not merely after COMMIT when
+        // enqueue happens. Explicit ownership admission uses this exact lock.
+        let lifecycle = storageRegistry.beginSessionLifecycle(for: [id])
+        var lifecycleTransferred = false
+        defer { if !lifecycleTransferred { storageRegistry.finishSessionLifecycle(lifecycle) } }
         // No suspension: journal/message/marker changes must roll back if the
         // final row DELETE fails. SAVEPOINT composes with an outer transaction;
         // it does not issue an unconditional BEGIN/COMMIT on somebody else's work.
@@ -317,7 +323,7 @@ extension ChatStore {
               sqlite3_exec(db, "RELEASE continuation_session_delete", nil, nil, nil) == SQLITE_OK else { return }
         savepointOpen = false
         BrowserTabPool.deletePersistedData(for: id)
-        ContinuationStorageBindings.registry(at: minisBaseURL).enqueueSessionLifecycleNotification {
+        storageRegistry.enqueueSessionLifecycleNotification(completing: lifecycle) {
             // Stop first, then enter ONE synchronous ChatStore actor operation.
             // It reads ALL live IDs (including a restored physical owner),
             // rebuilds revived ownership and performs locked physical cleanup.
@@ -331,6 +337,7 @@ extension ChatStore {
             do { _ = try await self.continuationCompleteStorageDeletion(id) }
             catch { /* Preserve files when liveness/ownership is ambiguous. */ }
         }
+        lifecycleTransferred = true
         // Clean up per-session etag cache
         if #available(iOS 17.0, *) {
             Task { @MainActor in CloudSyncEngine.shared.removeSessionCache(id) }

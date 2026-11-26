@@ -34,13 +34,18 @@ actor ChatStore {
     static var shared = try! ChatStore()
     var db: OpaquePointer?
     let url: URL
+    let minisBaseURL: URL
     init() throws {
         url = FileManager.default.temporaryDirectory.appendingPathComponent("continuation-\(UUID().uuidString).sqlite")
+        minisBaseURL = url.appendingPathExtension("minis")
         guard sqlite3_open(url.path, &db) == SQLITE_OK else { throw TestFailure("open") }
         let sql = """
             PRAGMA foreign_keys=ON;
             CREATE TABLE sessions(id TEXT PRIMARY KEY,title TEXT,model_id TEXT NOT NULL,
-              created_at REAL NOT NULL,updated_at REAL NOT NULL,source TEXT,memory_enabled INTEGER NOT NULL DEFAULT 1);
+              created_at REAL NOT NULL,updated_at REAL NOT NULL,source TEXT,memory_enabled INTEGER NOT NULL DEFAULT 1,
+              category TEXT,model_binding TEXT,pinned_at REAL,folder_id TEXT,parent_session_id TEXT,parent_tool_use_id TEXT,
+              remote_origin_device_id TEXT);
+            CREATE TABLE compact_markers(id TEXT PRIMARY KEY,session_id TEXT);
             CREATE TABLE messages(id TEXT PRIMARY KEY,session_id TEXT NOT NULL REFERENCES sessions(id),
               role TEXT NOT NULL,parts_json TEXT NOT NULL,created_at REAL NOT NULL,token_usage TEXT,
               reasoning_content TEXT,stream_interrupt_count INTEGER DEFAULT 0,sort_order INTEGER NOT NULL,
@@ -52,6 +57,7 @@ actor ChatStore {
     deinit {
         sqlite3_close(db)
         try? FileManager.default.removeItem(at: url)
+        try? FileManager.default.removeItem(at: minisBaseURL)
     }
     func sql(_ sql: String) throws {
         guard sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK else { throw TestFailure("fixture SQL failed: \(sql)") }

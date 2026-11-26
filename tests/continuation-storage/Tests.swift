@@ -76,6 +76,7 @@ struct ContinuationStorageIntegrationTests {
                 await drain(base)
                 try expect(outcome(result) == "failed", "SQL \(operation) \(action) is not reported as restored")
                 try expect(coordinator.events.isEmpty && coordinator.deleted.contains(root), "failed restore does not call sessionRestored or clear fence")
+                try expect(!ContinuationStorageBindings.registry(at: base).hasPendingSessionLifecycle(for: [root]), "failed restore releases its SQL lifecycle token")
                 try expect(!ContinuationStorageBindings.registry(at: base).registered(root), "failed restore does not invent ownership")
                 try await store.exec("DROP TRIGGER fail_restore")
                 let success = await store.restore(root)
@@ -85,6 +86,7 @@ struct ContinuationStorageIntegrationTests {
                 let skipped = await store.restore(root, updated: 1)
                 await drain(base)
                 try expect(outcome(skipped) == "newer" && coordinator.events.count == 1, "LWW skip does not revive VM or emit extra restore callback")
+                try expect(!ContinuationStorageBindings.registry(at: base).hasPendingSessionLifecycle(for: [root]), "LWW skip releases its lifecycle token")
                 await store.close()
             }
         }
@@ -95,6 +97,7 @@ struct ContinuationStorageIntegrationTests {
             try expect(outcome(await store.restore(root)) == "failed", "restore prepare failure is not a successful insert")
             await drain(base)
             try expect(coordinator.events.isEmpty && coordinator.deleted.contains(root), "prepare failure preserves deletion fence")
+            try expect(!ContinuationStorageBindings.registry(at: base).hasPendingSessionLifecycle(for: [root]), "prepare failure releases its lifecycle token")
             var refused = false
             do { _ = try await store.continuationCompleteStorageDeletion(root) } catch { refused = true }
             try expect(refused && fm.fileExists(atPath: base.appendingPathComponent(root + "/workspace/keep").path), "failed live-row query preserves all files")
@@ -118,6 +121,7 @@ struct ContinuationStorageIntegrationTests {
             try await store.exec("COMMIT")
             await drain(base)
             try expect(coordinator.events.isEmpty && coordinator.deleted.isEmpty, "SQL DELETE failure emits no sessionDeleted or pre-SQL userStopped")
+            try expect(!ContinuationStorageBindings.registry(at: base).hasPendingSessionLifecycle(for: [root]), "failed DELETE releases its lifecycle token after savepoint rollback")
             try expect(AgentJobRegistry.shared.cancellations == 0, "SQL DELETE failure does not cancel live agent jobs")
             try expect(fm.fileExists(atPath: base.appendingPathComponent(root + "/workspace/keep").path), "SQL DELETE failure keeps physical files")
             try await store.exec("DROP TRIGGER fail_delete")
@@ -142,8 +146,10 @@ struct ContinuationStorageIntegrationTests {
             registry.enqueueSessionLifecycleNotification { await gate.wait() }
             await store.deleteRestoreSequence(root, deleteAgain: deleteAgain)
             try expect(coordinator.events.isEmpty, "lifecycle barrier holds callbacks while SQL generations commit")
+            try expect(registry.hasPendingSessionLifecycle(for: [root]), "committed but delayed lifecycle retains its admission token")
             await gate.open()
             await drain(base)
+            try expect(!registry.hasPendingSessionLifecycle(for: [root]), "all applied lifecycle generations release their independent tokens")
             let expected = ["delete:" + root, "restore:" + root] + (deleteAgain ? ["delete:" + root] : [])
             try expect(coordinator.events == expected, "SQL delete→restore\(deleteAgain ? "→delete" : "") callbacks retain exact order")
             try expect(coordinator.deleted.contains(root) == deleteAgain, "latest committed generation owns final deletion fence")
@@ -158,6 +164,7 @@ struct ContinuationStorageIntegrationTests {
             try expect(outcome(await store.restore(root)) == "failed", "closed SQLite handle cannot report successful restore")
             await drain(base)
             try expect(coordinator.events.isEmpty && coordinator.deleted.contains(root), "closed-store restore leaves fence unchanged")
+            try expect(!ContinuationStorageBindings.registry(at: base).hasPendingSessionLifecycle(for: [root]), "closed-store failure releases its lifecycle token")
         }
         print("PASS: \(checks) exact-production ChatStore/SQLite storage boundary checks")
         print("NOTE: Coordinator/UI are call-recording adapters here; real old-VM queue fencing is covered by continuation-stop tests.")

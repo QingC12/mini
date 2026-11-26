@@ -45,14 +45,61 @@ final class ContinuationStorageBindings: @unchecked Sendable {
     private var lifecycleNotification: Task<Void, Never>?
     private var manifest: URL { base.appendingPathComponent(".continuation-storage-v1.json") }
 
+    struct SessionLifecycleToken: Hashable, Sendable { fileprivate let id: UUID }
+    // Registered BEFORE SQL, transferred to the ordered notification only on
+    // success. Multiple queued generations retain independent reservations.
+    private var pendingSessionLifecycles: [UUID: Set<String>] = [:]
+
+    func beginSessionLifecycle(for sessionIDs: Set<String>) -> SessionLifecycleToken {
+        lock.lock(); defer { lock.unlock() }
+        let token = SessionLifecycleToken(id: UUID())
+        pendingSessionLifecycles[token.id] = Set(sessionIDs.map { $0.uppercased() })
+        return token
+    }
+
+    func finishSessionLifecycle(_ token: SessionLifecycleToken) {
+        lock.lock(); defer { lock.unlock() }
+        pendingSessionLifecycles.removeValue(forKey: token.id)
+    }
+
+    private func hasPendingSessionLifecycleWhileLocked(for sessionIDs: Set<String>) -> Bool {
+        let ids = Set(sessionIDs.map { $0.uppercased() })
+        let pending = pendingSessionLifecycles.values.reduce(into: Set<String>()) { $0.formUnion($1) }
+        if !ids.isDisjoint(with: pending) { return true }
+        // SQL knows its endpoint; the registry also protects all live/retired
+        // members of that physical root. Coordinator adds journal-only edges.
+        func root(_ id: String) -> String {
+            if let pair = state.members.first(where: { $0.key.uppercased() == id }) { return pair.value.uppercased() }
+            if let pair = state.released.first(where: { $0.key.uppercased() == id }) { return pair.value.uppercased() }
+            return id
+        }
+        return !Set(ids.map(root)).isDisjoint(with: Set(pending.map(root)))
+    }
+
+    func hasPendingSessionLifecycle(for sessionIDs: Set<String>) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return hasPendingSessionLifecycleWhileLocked(for: sessionIDs)
+    }
+
+    /// The ownership check AND synchronous MainActor ownership mutation must
+    /// linearize with beginSessionLifecycle. No lock is ever held across await.
+    @MainActor
+    func withSessionLifecycleAdmission<T>(for sessionIDs: Set<String>, _ operation: () -> T) -> T? {
+        lock.lock(); defer { lock.unlock() }
+        guard !hasPendingSessionLifecycleWhileLocked(for: sessionIDs) else { return nil }
+        return operation()
+    }
+
     @discardableResult
     func enqueueSessionLifecycleNotification(
+        completing token: SessionLifecycleToken? = nil,
         _ operation: @escaping @MainActor @Sendable () async -> Void
     ) -> Task<Void, Never> {
         lock.lock(); defer { lock.unlock() }
         let previous = lifecycleNotification
         let next = Task { @MainActor in
             if let previous { await previous.value }
+            defer { if let token { self.finishSessionLifecycle(token) } }
             await operation()
         }
         lifecycleNotification = next
@@ -174,6 +221,7 @@ final class ContinuationStorageBindings: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         guard !loadFailed else { throw Failure.corrupt }
         guard Self.validID(source), Self.validID(destination), source.lowercased() != destination.lowercased() else { throw Failure.invalidID }
+        guard !hasPendingSessionLifecycleWhileLocked(for: [source, destination]) else { throw Failure.occupied }
         guard state.released[source] == nil, state.released[destination] == nil else { throw Failure.occupied }
         try requireDirectory(base)
         let root = state.members[source] ?? source

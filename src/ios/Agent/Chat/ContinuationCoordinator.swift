@@ -47,7 +47,19 @@ final class ContinuationCoordinator: ObservableObject {
         }
     }
 
+    private var lifecycleRegistry: ContinuationStorageBindings {
+        ContinuationStorageBindings.registry(at: ChatStore.shared.minisBaseURL)
+    }
+
+    /// Includes journal-only (not-yet-bound) edges as well as the registry's
+    /// physical-root members. Historical edges also participate in userStopped.
+    func hasPendingSessionLifecycle(for sessionID: String?) -> Bool {
+        guard let sessionID else { return false }
+        return lifecycleRegistry.hasPendingSessionLifecycle(for: connectedSessions(to: sessionID))
+    }
+
     func hasPendingHandoff(for sessionID: String?) -> Bool {
+        if hasPendingSessionLifecycle(for: sessionID) { return true }
         guard let sessionID, ContinuationPolicy.isEnabled, !explicitlyReopenedSources.contains(sessionID) else { return false }
         return stagingSources.contains(sessionID) || records.values.contains {
             $0.sourceSessionID == sessionID && !wasInvalidated($0)
@@ -98,7 +110,8 @@ final class ContinuationCoordinator: ObservableObject {
     /// Called while the old loop still owns its lease. No restore/start here.
     func stage(source: AIChatViewModel, attemptID: String, failure: ConversationTurnLimitFailure) async {
         guard ContinuationPolicy.isEnabled, source.helperConfig == nil, source.remoteDeviceId == nil,
-              !source.turnWasStopped, source.continuationQueueMayRun, let sid = source.sessionId, !isDeletedSession(sid), !stoppedSessions.contains(sid) else { return }
+              !source.turnWasStopped, source.continuationQueueMayRun, let sid = source.sessionId, !isDeletedSession(sid), !stoppedSessions.contains(sid),
+              !hasPendingSessionLifecycle(for: sid) else { return }
         explicitlyReopenedSources.remove(sid)
         stagingSources.insert(sid)
         defer { stagingSources.remove(sid) }
@@ -106,7 +119,8 @@ final class ContinuationCoordinator: ObservableObject {
         let policyVersion = policyEpoch
         func allowed() -> Bool {
             !Task.isCancelled && ContinuationPolicy.isEnabled && policyEpoch == policyVersion && !source.turnWasStopped &&
-                !stoppedSessions.contains(sid) && !isDeletedSession(sid) && source.continuationQueueMayRun && epochs[sid] == epoch
+                !stoppedSessions.contains(sid) && !isDeletedSession(sid) && !hasPendingSessionLifecycle(for: sid) &&
+                source.continuationQueueMayRun && epochs[sid] == epoch
         }
         do {
             let saved = try await ChatStore.shared.continuationRecords(activeOnly: false)
@@ -208,6 +222,7 @@ final class ContinuationCoordinator: ObservableObject {
               workers[record.id] == nil, !dispatchedInProcess.contains(record.id), !wasInvalidated(record),
               !stoppedSessions.contains(record.sourceSessionID), !stoppedSessions.contains(record.destinationSessionID),
               !isDeletedSession(record.sourceSessionID), !isDeletedSession(record.destinationSessionID),
+              !hasPendingSessionLifecycle(for: record.sourceSessionID), !hasPendingSessionLifecycle(for: record.destinationSessionID),
               !SessionConcurrencyManager.shared.runningSessions.contains(record.sourceSessionID),
               ViewModelCache.shared.get(for: record.sourceSessionID)?.isProcessing != true,
               ViewModelCache.shared.get(for: record.destinationSessionID)?.isProcessing != true else { return }
@@ -226,6 +241,7 @@ final class ContinuationCoordinator: ObservableObject {
             records[id].map { !wasInvalidated($0) } == true &&
             !stoppedSessions.contains(fence.source) && !stoppedSessions.contains(fence.destination) &&
             !isDeletedSession(fence.source) && !isDeletedSession(fence.destination) &&
+            !hasPendingSessionLifecycle(for: fence.source) && !hasPendingSessionLifecycle(for: fence.destination) &&
             epochs[fence.source] == fence.sourceEpoch && epochs[fence.destination] == fence.destinationEpoch &&
             !SessionConcurrencyManager.shared.runningSessions.contains(fence.source) &&
             ViewModelCache.shared.get(for: fence.source)?.isProcessing != true
@@ -325,23 +341,25 @@ final class ContinuationCoordinator: ObservableObject {
                 guard allowed(id, fence: fence) else { return }
                 publish(claimed)
                 record = claimed
-                // Absolutely no await between this gate and the synchronous
-                // resume call: resume clears cancellation and is not a Stop gate.
-                guard ready(vm, record: record, fence: fence),
-                      queueSnapshot(ViewModelCache.shared.get(for: record.sourceSessionID)) == snapshot else {
-                    await pause(record, reason: RecoveryError.changedQueue.localizedDescription)
+                // Linearize the final synchronous ownership mutation with SQL
+                // lifecycle registration, not just a racy Bool preflight.
+                let related = connectedSessions(to: record.sourceSessionID).union(connectedSessions(to: record.destinationSessionID))
+                let resumed = lifecycleRegistry.withSessionLifecycleAdmission(for: related) {
+                    guard ready(vm, record: record, fence: fence),
+                          queueSnapshot(ViewModelCache.shared.get(for: record.sourceSessionID)) == snapshot else { return false }
+                    vm.sessionSource = "continuation"
+                    vm.programmaticTurnOrigin = .continuation(recoveryID: id)
+                    vm.programmaticSilentTurn = true
+                    vm.resumeUnansweredUserTurn(forContinuation: true)
+                    guard vm.isProcessing else { return false }
+                    dispatchedInProcess.insert(id)
+                    ViewModelCache.shared.get(for: record.sourceSessionID)?.acceptContinuationHandoff(promptIDs: Set(snapshot.ids))
+                    return true
+                } ?? false
+                guard resumed else {
+                    await pause(record, reason: "Lifecycle pending, ownership changed, or the successor rejected its persisted seed.")
                     return
                 }
-                vm.sessionSource = "continuation"
-                vm.programmaticTurnOrigin = .continuation(recoveryID: id)
-                vm.programmaticSilentTurn = true
-                vm.resumeUnansweredUserTurn(forContinuation: true)
-                guard vm.isProcessing else {
-                    await pause(record, reason: "The successor rejected its persisted seed; inspect it before retrying.")
-                    return
-                }
-                dispatchedInProcess.insert(id)
-                ViewModelCache.shared.get(for: record.sourceSessionID)?.acceptContinuationHandoff(promptIDs: Set(snapshot.ids))
                 return
             }
             await pause(record, reason: RecoveryError.changedQueue.localizedDescription)
@@ -407,8 +425,9 @@ final class ContinuationCoordinator: ObservableObject {
         sessionID.map { deletedSessions.contains($0) } ?? false
     }
 
-    func isQueueFenced(_ sessionID: String?) -> Bool {
-        sessionID.map { hardStoppedSessions.contains($0) || deletedSessions.contains($0) } ?? false
+    func isQueueFenced(_ sessionID: String?, includingPendingLifecycle: Bool = true) -> Bool {
+        (includingPendingLifecycle && hasPendingSessionLifecycle(for: sessionID)) ||
+            (sessionID.map { hardStoppedSessions.contains($0) || deletedSessions.contains($0) } ?? false)
     }
 
     /// All known edges belong to the same physical task, even after a redirect,
@@ -514,15 +533,17 @@ final class ContinuationCoordinator: ObservableObject {
     @discardableResult
     func userBeganRequest(_ sessionID: String?) -> Bool {
         guard let sessionID else { return true }
-        guard !isDeletedSession(sessionID),
-              ViewModelCache.shared.get(for: sessionID)?.continuationQueueFence.isDeleted != true else { return false }
-        userStopped(sessionID)
-        stoppedSessions.remove(sessionID)
-        hardStoppedSessions.remove(sessionID)
-        explicitlyReopenedSources.insert(sessionID)
-        epochs[sessionID] = UUID()
-        let reopened = ViewModelCache.shared.get(for: sessionID)?.reopenContinuationQueueForExplicitUserRequest() ?? true
-        persistStopFences()
-        return reopened
+        return lifecycleRegistry.withSessionLifecycleAdmission(for: connectedSessions(to: sessionID)) {
+            guard !isDeletedSession(sessionID),
+                  ViewModelCache.shared.get(for: sessionID)?.continuationQueueFence.isDeleted != true else { return false }
+            userStopped(sessionID)
+            stoppedSessions.remove(sessionID)
+            hardStoppedSessions.remove(sessionID)
+            explicitlyReopenedSources.insert(sessionID)
+            epochs[sessionID] = UUID()
+            let reopened = ViewModelCache.shared.get(for: sessionID)?.reopenContinuationQueueForExplicitUserRequest() ?? true
+            persistStopFences()
+            return reopened
+        } ?? false
     }
 }

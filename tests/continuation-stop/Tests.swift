@@ -273,6 +273,10 @@ import Foundation
         }
     }
     @MainActor static func main() async {
+        DispatchQueue.global().asyncAfter(deadline: .now() + 90) {
+            fputs("FAIL: continuation-stop lifecycle watchdog expired\n", stderr)
+            exit(124)
+        }
         let keys = [ContinuationPolicy.settingsKey, "nativeContinuation.stoppedSessions",
             "nativeContinuation.hardStoppedSessions", "nativeContinuation.deletedSessions",
             "nativeContinuation.invalidatedBefore", "nativeContinuation.policyInvalidatedBefore"]
@@ -297,7 +301,11 @@ import Foundation
             try await testRerunDeleteRestore()
             try await testRerunSlotAndKernelFences()
             try await testRerunPersistenceAndErrorFences()
-            print("PASS: \(assertions) assertions using exact production Cancel + complete PromptQueue/Rerun + Coordinator/Store/Fence")
+            try await testSQLLifecycleBlocksTakeover()
+            try await testSQLLifecycleRestoreNewVM()
+            try await testSQLLifecycleFailureReleasesPending()
+            try testRegistryOnlyLifecycleScope()
+            print("PASS: \(assertions) assertions using exact production Cancel + complete PromptQueue/Rerun + Coordinator/Store/Fence + real SQL lifecycle")
         } catch {
             fputs("FAIL: \(error)\n", stderr)
             exit(1)

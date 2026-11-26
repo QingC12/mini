@@ -76,6 +76,7 @@ for name, path in (
     ('continuation-reliability', 'tests/run_continuation_reliability_tests.sh'),
     ('continuation-router', 'tests/run_continuation_router_tests.sh'),
     ('continuation-stop', 'tests/run_continuation_stop_tests.sh'),
+    ('continuation-slot', 'tests/run_continuation_slot_tests.sh'),
 ):
     # Required gates in both workflows: a deleted/missing runner must fail,
     # never silently lower the suite count and let an IPA through.

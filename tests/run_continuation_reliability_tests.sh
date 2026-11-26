@@ -29,6 +29,7 @@ mkdir -p "$TMP/modules" "$TMP/home"
     "$ROOT/src/ios/Agent/Chat/ContinuationRecord.swift" \
     "$ROOT/src/ios/Agent/Chat/ChatStore+Continuation.swift" \
     "$ROOT/src/ios/Agent/Chat/ContinuationQueueFence.swift" \
+    "$ROOT/src/ios/Agent/Chat/ContinuationStorageBindings.swift" \
     "$ROOT/src/ios/Agent/Chat/ContinuationCoordinator.swift" \
     "$ROOT/tests/continuation-reliability/Tests.swift" \
     -o "$TMP/ContinuationReliabilityTests"

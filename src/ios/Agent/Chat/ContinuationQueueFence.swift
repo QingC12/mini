@@ -37,11 +37,16 @@ extension AIChatViewModel {
     /// Never clears a fence. Use at EVERY asynchronous queue dispatch boundary.
     var continuationQueueMayRun: Bool {
         !continuationQueueFence.isStopped && !continuationQueueFence.isDeleted &&
-            !ContinuationCoordinator.shared.isQueueFenced(sessionId)
+            !ContinuationCoordinator.shared.isQueueFenced(sessionId, includingPendingLifecycle: !isProcessing)
     }
 
     func continuationQueueMayRun(generation: UUID) -> Bool {
-        continuationQueueMayRun && continuationQueueFence.permits(generation) && !Task.isCancelled
+        // Pending SQL is an admission reservation, NOT a Stop of an already
+        // admitted generation. A failed SQL operation must not strand a slot
+        // waiter/active loop by making its captured-owner checks return false.
+        // On successful apply Stop/restore changes the real fence/generation.
+        !ContinuationCoordinator.shared.isQueueFenced(sessionId, includingPendingLifecycle: false) &&
+            continuationQueueFence.permits(generation) && !Task.isCancelled
     }
 
     /// Called only by the coordinator after this endpoint's explicit request.

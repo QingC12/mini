@@ -15,7 +15,9 @@ enum ContinuationWorkspace {
     #if !CONTINUATION_STORAGE_STANDALONE
     @MainActor @discardableResult
     static func prepare(sourceSessionID: String, destinationSessionID: String) async throws -> Receipt {
+        try assertNoPendingLifecycle(sourceSessionID, destinationSessionID)
         _ = try await ChatStore.shared.continuationReconcileStorageOwnership()
+        try assertNoPendingLifecycle(sourceSessionID, destinationSessionID)
         try await ChatStore.shared.continuationAssertEmptyDestination(source: sourceSessionID, destination: destinationSessionID)
         try assertAgentIdle(sourceSessionID, destinationSessionID)
         try Task.checkCancellation()
@@ -37,7 +39,15 @@ enum ContinuationWorkspace {
         return Receipt(storageRootID: root, sharedLiveStorage: true)
     }
 
+    @MainActor private static func assertNoPendingLifecycle(_ source: String, _ destination: String) throws {
+        guard !ContinuationCoordinator.shared.hasPendingSessionLifecycle(for: source),
+              !ContinuationCoordinator.shared.hasPendingSessionLifecycle(for: destination) else {
+            throw ContinuationStorageBindings.Failure.occupied
+        }
+    }
+
     @MainActor static func assertAgentIdle(_ source: String, _ destination: String) throws {
+        try assertNoPendingLifecycle(source, destination)
         for id in [source, destination] {
             guard !SessionConcurrencyManager.shared.runningSessions.contains(id),
                   ViewModelCache.shared.get(for: id)?.isProcessing != true else {

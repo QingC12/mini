@@ -1222,18 +1222,29 @@ extension AIChatViewModel {
     /// AgentJobRegistry before it starts. Everyone else waits for a slot.
     ///
     /// Returns the lease to hand back with `SessionConcurrencyManager.release`
-    /// (callers `defer` it right after), or nil when the wait was cancelled -
-    /// the run state has then been reset and the caller must return. A nil
-    /// result holds nothing, so there is nothing to release.
+    /// (callers `defer` it right after), or nil when the wait was cancelled or
+    /// superseded. Only the captured owner may reset its run state; a later
+    /// explicit request must keep its UI/background ownership. A nil result
+    /// holds nothing, so there is nothing to release.
     func acquireSessionSlot(_ sid: String) async -> SessionSlotLease? {
+        let generation = continuationQueueFence.generation
         let concurrency = SessionConcurrencyManager.shared
         let exempt = helperConfig != nil
         self.isSuspended = !exempt && concurrency.runningSessions.count >= concurrency.maxConcurrent
         do {
             let lease = try await concurrency.acquire(sessionId: sid, exempt: exempt)
+            guard self.continuationQueueMayRun(generation: generation) else {
+                // acquire can succeed just as Stop/retry replaces this owner.
+                // No caller receives this lease, so release it here exactly once.
+                concurrency.release(lease)
+                return nil
+            }
             self.isSuspended = false
             return lease
         } catch {
+            // Stop changes generation synchronously, before its resumed waiter
+            // can throw. Do not let that old failure tear down a new request.
+            guard self.continuationQueueFence.generation == generation else { return nil }
             self.isSuspended = false
             self.isProcessing = false
             self.endBackgroundProcessing()

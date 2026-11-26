@@ -66,6 +66,10 @@ extension ChatStore {
     func restoreSession(_ session: ChatSession,
                         memoryEnabled: Bool,
                         modelBinding: String?) -> RestoreOutcome {
+        let storageRegistry = ContinuationStorageBindings.registry(at: minisBaseURL)
+        // This reservation precedes lookup/write; SQL success -> enqueue has no
+        // unprotected window in which a fresh VM could acquire ownership.
+        let lifecycle = storageRegistry.beginSessionLifecycle(for: [session.id])
         // FULL: backup restore rewrites rows in bulk and can add sessions.
         invalidateSessionListCache()
         // Backups deliberately reuse deleted IDs. Only a committed row write
@@ -77,9 +81,12 @@ extension ChatStore {
                 do { try continuationProtectRestoredStorage() }
                 catch { logger.warning("[Restore] Storage ownership protection deferred; destructive cleanup remains fail-closed.") }
                 let restoredID = session.id
-                ContinuationStorageBindings.registry(at: minisBaseURL).enqueueSessionLifecycleNotification {
+                storageRegistry.enqueueSessionLifecycleNotification(completing: lifecycle) {
                     ContinuationCoordinator.shared.sessionRestored(restoredID)
                 }
+            } else {
+                // Lookup/write failure and LWW skip never hard-stop anything.
+                storageRegistry.finishSessionLifecycle(lifecycle)
             }
         }
         guard let db else { return .skippedNoParent }
