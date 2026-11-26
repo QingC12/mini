@@ -122,12 +122,14 @@ extension ContinuationStopTests {
             try await store.sql("DROP TRIGGER lifecycle_hold; CREATE TRIGGER lifecycle_fail BEFORE DELETE ON sessions BEGIN SELECT hold_lifecycle(); SELECT RAISE(\(action)); END")
             let deletion = Task.detached { await store.testDeleteSession(a) }
             let reached = sqlGate.reachedSQL.wait(timeout: .now() + 10) == .success
-            let pending = lifecycleRegistry().hasPendingSessionLifecycle(for: [b])
+            // This fixture is journal-linked but not yet physically bound;
+            // Coordinator (not the root-only registry API) expands A↔B.
+            let pending = ContinuationCoordinator.shared.hasPendingSessionLifecycle(for: b)
             let capturedOwnerMayRun = target.continuationQueueMayRun(generation: generation)
             let stillActive = !target.turnWasStopped && target.isProcessing
             sqlGate.continueSQL.signal()
             await deletion.value
-            try expect(reached && pending, "failed DELETE did not expose a real precommit pending window")
+            try expect(reached && pending, "failed DELETE precommit pending window: reached=\(reached), linkedPending=\(pending)")
             try expect(capturedOwnerMayRun && stillActive, "SQL pending temporarily turned the already-admitted generation into Stop")
             await drainLifecycle()
             try expect(!lifecycleRegistry().hasPendingSessionLifecycle(for: [a, b]), "failed DELETE leaked pending reservation")
