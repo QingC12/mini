@@ -268,13 +268,27 @@ extension ChatStore {
     }
 
     private func deleteSessionLocalRowsOnly(_ id: String) {
+        // No suspension: journal/message/marker changes must roll back if the
+        // final row DELETE fails. SAVEPOINT composes with an outer transaction;
+        // it does not issue an unconditional BEGIN/COMMIT on somebody else's work.
+        guard let db,
+              sqlite3_exec(db, "SAVEPOINT continuation_session_delete", nil, nil, nil) == SQLITE_OK else { return }
+        var savepointOpen = true
+        defer {
+            if savepointOpen {
+                sqlite3_exec(db, "ROLLBACK TO continuation_session_delete", nil, nil, nil)
+                sqlite3_exec(db, "RELEASE continuation_session_delete", nil, nil, nil)
+            }
+        }
         // Pause the non-owning recovery links before removing either endpoint.
         do { try pauseContinuationsForDeletedSession(id) }
         catch {
             logger.error("[Continuation] Could not journal session deletion; keeping local rows.")
             return
         }
-        Task { @MainActor in ContinuationCoordinator.shared.userStopped(id) }
+        // Row failure must not publish a deletion fence or stop a live VM.
+        // Successful deletion below queues the hard-stop notification in SQL
+        // commit order with backup restoration; ordinary cancel would drain.
         // [T-ios-listsessions-cache] Invalidate here (the low-level row delete)
         // so ALL callers are covered — deleteSession AND deleteSessionLocalOnly.
         // FULL: removes a row from the set.
@@ -288,13 +302,6 @@ extension ChatStore {
         //    browser, attachments …), not just the media subfolders, plus
         //    the persisted browser-tab file. Global buckets are untouched
         //    because only UUID-named directories are ever removed.
-        Task { @MainActor in
-            AgentJobRegistry.shared.dropQueuedDelegations(parent: id, reason: "sessionDeleted")
-            AgentJobRegistry.shared.cancelAll(parent: id, reason: "sessionDeleted")
-            AgentJobRegistry.shared.cancelAll(session: id, reason: "sessionDeleted")
-            // [T-scheduled-active-session] …and the timers it created.
-            AgentJobRegistry.shared.cancelScheduled(createdBy: id, reason: "sessionDeleted", silent: true)
-        }
         deleteMessages(sessionId: id)
         deleteCompactMarkers(sessionId: id)
 
@@ -303,25 +310,26 @@ extension ChatStore {
         var rowDeleted = false
         if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
             sqlite3_bind_text(stmt, 1, (id as NSString).utf8String, -1, nil)
-            rowDeleted = sqlite3_step(stmt) == SQLITE_DONE
+            rowDeleted = sqlite3_step(stmt) == SQLITE_DONE && sqlite3_changes(db) > 0
         }
         sqlite3_finalize(stmt)
-        guard rowDeleted else { return }
+        guard rowDeleted,
+              sqlite3_exec(db, "RELEASE continuation_session_delete", nil, nil, nil) == SQLITE_OK else { return }
+        savepointOpen = false
         BrowserTabPool.deletePersistedData(for: id)
-        let storageBase = minisBaseURL
-        Task { @MainActor in
-            // Stop the deleted endpoint first; retained continuation members
-            // still own the same physical files, even if the source row is gone.
-            ViewModelCache.shared.get(for: id)?.cancel()
-            do {
-                let stillExists = try await ChatStore.shared.continuationSessionExists(id)
-                guard !stillExists else { return }
-                _ = try await Task.detached(priority: .utility) {
-                    try SessionStorageCleanup.releaseDeletedSession(id, minisBase: storageBase)
-                }.value
-            } catch {
-                // Keep files on ambiguous deletion/journal failure, never guess.
-            }
+        ContinuationStorageBindings.registry(at: minisBaseURL).enqueueSessionLifecycleNotification {
+            // Stop first, then enter ONE synchronous ChatStore actor operation.
+            // It reads ALL live IDs (including a restored physical owner),
+            // rebuilds revived ownership and performs locked physical cleanup.
+            // No ordinary cancel: that path may automatically drain queued work.
+            ContinuationCoordinator.shared.sessionDeleted(id)
+            AgentJobRegistry.shared.dropQueuedDelegations(parent: id, reason: "sessionDeleted")
+            AgentJobRegistry.shared.cancelAll(parent: id, reason: "sessionDeleted")
+            AgentJobRegistry.shared.cancelAll(session: id, reason: "sessionDeleted")
+            // [T-scheduled-active-session] …and the timers it created.
+            AgentJobRegistry.shared.cancelScheduled(createdBy: id, reason: "sessionDeleted", silent: true)
+            do { _ = try await self.continuationCompleteStorageDeletion(id) }
+            catch { /* Preserve files when liveness/ownership is ambiguous. */ }
         }
         // Clean up per-session etag cache
         if #available(iOS 17.0, *) {

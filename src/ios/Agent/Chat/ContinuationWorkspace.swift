@@ -27,7 +27,7 @@ enum ContinuationWorkspace {
         let base = AIChatViewModel.minisPersistentBase
         let registry = ContinuationStorageBindings.registry(at: base)
         guard let rootID = registry.rootID(for: sourceSessionID),
-              workspace.deletingLastPathComponent().standardizedFileURL == base.appendingPathComponent(rootID, isDirectory: true).standardizedFileURL else {
+              workspace.deletingLastPathComponent().standardizedFileURL.resolvingSymlinksInPath() == base.appendingPathComponent(rootID, isDirectory: true).standardizedFileURL.resolvingSymlinksInPath() else {
             throw ContinuationStorageBindings.Failure.unsafePath
         }
         // Synchronous MainActor mutation: no new agent start can interleave.
@@ -56,10 +56,9 @@ enum ContinuationWorkspace {
 
 #if !CONTINUATION_STORAGE_STANDALONE
 extension ChatStore {
-    /// Invoke on app restore and after successful session-row deletion. This
-    /// actor method contains no await between the live-row read and reconcile.
-    @discardableResult
-    func continuationReconcileStorageOwnership() throws -> [String] {
+    /// Current authoritative rows. Callers must not suspend between this read
+    /// and a destructive registry operation: restore can reuse a deleted ID.
+    private func continuationLiveStorageSessionIDs() throws -> Set<String> {
         guard let db else { throw ContinuationStorageBindings.Failure.storage }
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, "SELECT id FROM sessions", -1, &stmt, nil) == SQLITE_OK else { throw ContinuationStorageBindings.Failure.storage }
@@ -71,7 +70,28 @@ extension ChatStore {
             live.insert(String(cString: text)); rc = sqlite3_step(stmt)
         }
         guard rc == SQLITE_DONE else { throw ContinuationStorageBindings.Failure.storage }
+        return live
+    }
+
+    @discardableResult
+    func continuationReconcileStorageOwnership() throws -> [String] {
+        let live = try continuationLiveStorageSessionIDs()
         return try ContinuationStorageBindings.registry(at: minisBaseURL).reconcile(liveSessionIDs: live)
+    }
+
+    /// Unified deletion boundary: current live IDs, revival of old receipts,
+    /// physical-owner liveness, dereference and deletion, all without an await.
+    @discardableResult
+    func continuationCompleteStorageDeletion(_ id: String) throws -> Bool {
+        let live = try continuationLiveStorageSessionIDs()
+        return try SessionStorageCleanup.completeDeletion(id, minisBase: minisBaseURL, liveSessionIDs: live)
+    }
+
+    /// Restore rows arrive before file trees. Protect resurrected roots now;
+    /// this hook intentionally does NOT reclaim unrelated stale directories.
+    func continuationProtectRestoredStorage() throws {
+        let live = try continuationLiveStorageSessionIDs()
+        _ = try ContinuationStorageBindings.registry(at: minisBaseURL).restoreLiveReferences(liveSessionIDs: live)
     }
 
     /// Throwing SQL guard: unlike loadMessages() an I/O/schema failure must not

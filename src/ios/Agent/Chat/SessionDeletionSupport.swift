@@ -64,33 +64,36 @@ enum SessionStorageCleanup {
     static func removeSessionDirectory(_ sessionId: String, minisBase: URL,
                                        fm: FileManager = .default) -> Bool {
         guard isSessionDirectoryName(sessionId) else { return false }
-        // Clear-files/orphan cleanup is NOT session deletion. Never sever a
-        // live storage reference or follow an alias into another chat's files.
-        guard !ContinuationStorageBindings.registry(at: minisBase).registered(sessionId) else { return false }
-        let dir = directory(for: sessionId, minisBase: minisBase)
-        guard fm.fileExists(atPath: dir.path) else { return false }
-        do {
-            try fm.removeItem(at: dir)
-            return true
-        } catch {
-            return false
-        }
+        // One registry critical section covers ownership authorization AND
+        // removal, so bind cannot publish a shared reference in between.
+        return (try? ContinuationStorageBindings.registry(at: minisBase)
+            .removeUnsharedStorage(sessionId, fm: fm)) ?? false
     }
 
-    /// Call only AFTER deleting the session row/stopping its writers. Unlike
-    /// clear-files, this removes one ownership reference, preserving a physical
-    /// task root until its last continuation member is deleted.
+    /// Media-only clear uses the identical lock/ownership boundary as whole-root
+    /// clear. The production ChatStore media entry and race tests both use this.
     @discardableResult
-    static func releaseDeletedSession(_ sessionId: String, minisBase: URL) throws -> Bool {
+    static func removeSessionMedia(_ sessionId: String, subdirectories: [String],
+                                   minisBase: URL, fm: FileManager = .default) -> Bool {
         guard isSessionDirectoryName(sessionId) else { return false }
-        return try ContinuationStorageBindings.registry(at: minisBase).releaseDeletedSession(sessionId)
+        return (try? ContinuationStorageBindings.registry(at: minisBase)
+            .removeUnsharedStorage(sessionId, subdirectories: subdirectories, fm: fm)) ?? false
     }
 
-    /// Exact integration entry for ChatStore's successful DELETE boundary.
-    /// Throws instead of treating a failed ownership write as successful cleanup.
+    /// Live IDs must come from current SQL rows in the SAME synchronous
+    /// ChatStore actor operation. There is intentionally no unsafe overload.
     @discardableResult
-    static func completeDeletion(_ sessionId: String, minisBase: URL) throws -> Bool {
-        try releaseDeletedSession(sessionId, minisBase: minisBase)
+    static func releaseDeletedSession(_ sessionId: String, minisBase: URL,
+                                      liveSessionIDs: Set<String>) throws -> Bool {
+        guard isSessionDirectoryName(sessionId) else { return false }
+        return try ContinuationStorageBindings.registry(at: minisBase)
+            .releaseDeletedSession(sessionId, liveSessionIDs: liveSessionIDs)
+    }
+
+    @discardableResult
+    static func completeDeletion(_ sessionId: String, minisBase: URL,
+                                 liveSessionIDs: Set<String>) throws -> Bool {
+        try releaseDeletedSession(sessionId, minisBase: minisBase, liveSessionIDs: liveSessionIDs)
     }
 
     // MARK: Orphaned session directories  [T-storage-orphan-cleanup]

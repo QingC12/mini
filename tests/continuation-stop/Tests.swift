@@ -143,6 +143,23 @@ import Foundation
         try expect(compact.starts == 0 && compact.promptQueue.count == 1 && !compact.postCompactDrainPending,
                    "old post-compact task revived after stop->reopen or left drain stuck")
 
+        let compactOwner = vm("compact-state-owner")
+        compactOwner.isCompacting = true
+        let oldCompactGeneration = compactOwner.continuationQueueFence.generation
+        compactOwner.cancel(resumeQueuedPrompts: false)
+        try expect(!compactOwner.isCompacting, "hard cancel left the revoked compact latch set")
+        try expect(compactOwner.reopenContinuationQueueForExplicitUserRequest(), "compact owner could not explicitly reopen")
+        compactOwner.isProcessing = true
+        compactOwner.isCompacting = true
+        compactOwner.compactTask = Task { @MainActor in }
+        compactOwner.finishCompactionState(generation: oldCompactGeneration, wasProcessingOnEntry: false)
+        try expect(compactOwner.isProcessing && compactOwner.isCompacting && compactOwner.compactTask != nil,
+                   "old production compact defer cleared the new owner's processing/compact slot")
+        compactOwner.finishCompactionState(generation: compactOwner.continuationQueueFence.generation,
+                                          wasProcessingOnEntry: true)
+        try expect(compactOwner.isProcessing && !compactOwner.isCompacting && compactOwner.compactTask == nil,
+                   "current compact owner could not release its own state")
+
         for injection in [false, true] {
             let endpoint = vm("await-paste-\(injection)")
             let path = try attachment()

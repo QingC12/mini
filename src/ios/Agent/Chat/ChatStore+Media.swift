@@ -73,19 +73,11 @@ extension ChatStore {
 
     /// Delete all media for a session.
     func deleteSessionMedia(_ sessionId: String) {
-        // Continuation members share one physical task root. The final session
-        // deletion releases ownership; clearing one chat must not erase peers.
-        guard !ContinuationStorageBindings.registry(at: minisBaseURL).registered(sessionId) else { return }
-        let fm = FileManager.default
-
-        // [T-paste-mediaref] "pasted" holds pasted-text refs; it must be here
-        // or those files outlive the session that owns them.
-        for subdir in ["browser", "attachments", "images", PastePlaceholder.mediaSubdir] {
-            let dirURL = minisBaseURL.appendingPathComponent("\(sessionId)/\(subdir)")
-            if fm.fileExists(atPath: dirURL.path) {
-                try? fm.removeItem(at: dirURL)
-            }
-        }
+        // Ownership check and the complete media removal share bind's registry
+        // lock. A stale registered() preflight cannot authorize later deletion.
+        _ = SessionStorageCleanup.removeSessionMedia(sessionId,
+            subdirectories: ["browser", "attachments", "images", PastePlaceholder.mediaSubdir],
+            minisBase: minisBaseURL)
     }
 
     /// Returns a closure that resolves a MediaRef to a file URL.

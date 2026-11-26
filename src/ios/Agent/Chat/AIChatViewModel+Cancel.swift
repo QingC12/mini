@@ -269,6 +269,9 @@ extension AIChatViewModel {
                 }
                 promptQueue.removeAll()
             }
+            // cancel() now owns teardown. The old compact's generation-fenced
+            // defer must not leave this latch set or clear a later owner's slot.
+            isCompacting = false
         }
         endBackgroundProcessing()
 

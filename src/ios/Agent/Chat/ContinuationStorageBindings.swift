@@ -39,7 +39,35 @@ final class ContinuationStorageBindings: @unchecked Sendable {
     private let lock = NSRecursiveLock()
     private var state = State()
     private var loadFailed = false
+    // SQL lifecycle notifications are enqueued synchronously by ChatStore in
+    // commit order. Unstructured MainActor Tasks alone may arrive out of order:
+    // a late delete callback must not re-tombstone an already restored ID.
+    private var lifecycleNotification: Task<Void, Never>?
     private var manifest: URL { base.appendingPathComponent(".continuation-storage-v1.json") }
+
+    @discardableResult
+    func enqueueSessionLifecycleNotification(
+        _ operation: @escaping @MainActor @Sendable () async -> Void
+    ) -> Task<Void, Never> {
+        lock.lock(); defer { lock.unlock() }
+        let previous = lifecycleNotification
+        let next = Task { @MainActor in
+            if let previous { await previous.value }
+            await operation()
+        }
+        lifecycleNotification = next
+        return next
+    }
+
+    #if CONTINUATION_STORAGE_TEST_EXECUTABLE
+    // Nonblocking cross-thread probe used while FileManager is paused exactly
+    // between authorization and removal. No timing-based "probably blocked".
+    func ownershipLockIsAvailableForTesting() -> Bool {
+        guard lock.try() else { return false }
+        lock.unlock()
+        return true
+    }
+    #endif
     init(base: URL) {
         self.base = base.standardizedFileURL.resolvingSymlinksInPath()
         do {
@@ -83,8 +111,41 @@ final class ContinuationStorageBindings: @unchecked Sendable {
     }
     func registered(_ sessionID: String) -> Bool {
         lock.lock(); defer { lock.unlock() }
-        return loadFailed || state.members[sessionID] != nil || state.members.values.contains(sessionID)
-            || state.released[sessionID] != nil
+        return registeredWhileLocked(sessionID)
+    }
+    private func registeredWhileLocked(_ sessionID: String) -> Bool {
+        let id = sessionID.uppercased()
+        return loadFailed || state.members.keys.contains { $0.uppercased() == id }
+            || state.members.values.contains { $0.uppercased() == id }
+            || state.released.keys.contains { $0.uppercased() == id }
+    }
+
+    /// Clear-files/media must linearize with bind/release. The ownership check
+    /// AND every filesystem removal are under the same registry lock, including
+    /// background Storage UI callers. A preflight registered() Boolean is never
+    /// authorization to delete after its lock has been released.
+    @discardableResult
+    func removeUnsharedStorage(_ id: String, subdirectories: [String]? = nil,
+                               fm: FileManager = .default) throws -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard !loadFailed else { throw Failure.corrupt }
+        guard Self.validID(id) else { throw Failure.invalidID }
+        guard !registeredWhileLocked(id) else { return false }
+        try requireDirectory(base)
+        let root = base.appendingPathComponent(id, isDirectory: true)
+        guard Self.exists(root) else { return false }
+        try requireDirectory(root) // Never clear an unregistered root symlink.
+        let targets: [URL]
+        if let subdirectories {
+            guard subdirectories.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." && !$0.contains("/") && !$0.contains("\\") }) else { throw Failure.unsafePath }
+            targets = subdirectories.map { root.appendingPathComponent($0) }
+        } else { targets = [root] }
+        var removed = false
+        for target in targets where Self.exists(target) {
+            try fm.removeItem(at: target)
+            removed = true
+        }
+        return removed
     }
     func protectedRootIDs() -> Set<String>? {
         lock.lock(); defer { lock.unlock() }
@@ -144,31 +205,73 @@ final class ContinuationStorageBindings: @unchecked Sendable {
         return root
     }
 
-    /// Reconcile an authoritative live-row snapshot taken under ChatStore's
-    /// actor (without suspension). Repairs DB-delete-before-dereference crashes;
-    /// never infers liveness from directory existence or an in-memory count.
+    /// Rebuild live ownership BEFORE replaying any deletion receipt. Backup
+    /// restore intentionally reuses session IDs. Its row arrives before files,
+    /// so an absent restored directory still reserves its own physical root;
+    /// an existing path must be a contained real root or its exact known alias.
     @discardableResult
-    func reconcile(liveSessionIDs: Set<String>) throws -> [String] {
+    func restoreLiveReferences(liveSessionIDs: Set<String>) throws -> Bool {
         lock.lock(); defer { lock.unlock() }
         guard !loadFailed else { throw Failure.corrupt }
         let live = Set(liveSessionIDs.map { $0.uppercased() })
+        var next = state
+        for (id, priorRoot) in state.released where live.contains(id.uppercased()) {
+            let path = base.appendingPathComponent(id, isDirectory: true)
+            let root: String
+            if Self.exists(path) {
+                let type = try FileManager.default.attributesOfItem(atPath: path.path)[.type] as? FileAttributeType
+                if type == .typeSymbolicLink {
+                    guard id != priorRoot, validAlias(path, root: priorRoot) else { throw Failure.unsafePath }
+                    root = priorRoot
+                } else {
+                    try requireDirectory(path)
+                    root = id // A restored alias can now be an independent root.
+                }
+            } else { root = id }
+            next.released.removeValue(forKey: id)
+            next.members[id] = root
+        }
+        // Protect a live physical owner even if an old/incomplete receipt did
+        // not preserve its self-reference. Never delete based on counts alone.
+        for root in Set(next.members.values) where live.contains(root.uppercased()) {
+            let path = base.appendingPathComponent(root, isDirectory: true)
+            if Self.exists(path) { try requireDirectory(path) }
+            next.released.removeValue(forKey: root)
+            next.members[root] = root
+        }
+        guard next != state else { return false }
+        try save(next)
+        return true
+    }
+
+    /// Authoritative SQL live-row snapshot MUST be taken by ChatStore in the
+    /// same synchronous actor operation as this call. No await/detached cleanup.
+    @discardableResult
+    func reconcile(liveSessionIDs: Set<String>) throws -> [String] {
+        lock.lock(); defer { lock.unlock() }
+        _ = try restoreLiveReferences(liveSessionIDs: liveSessionIDs)
+        let live = Set(liveSessionIDs.map { $0.uppercased() })
         let stale = state.members.keys.filter { !live.contains($0.uppercased()) }.sorted()
-        for id in stale { _ = try releaseDeletedSession(id) }
-        // Retry filesystem cleanup interrupted after a durable release receipt.
+        for id in stale { _ = try releaseWhileLocked(id, live: live) }
         for id in state.released.keys.sorted() where !live.contains(id.uppercased()) {
-            _ = try releaseDeletedSession(id)
+            _ = try releaseWhileLocked(id, live: live)
         }
         return stale
     }
 
-    /// ONLY after the chat row is deleted and its writers have been stopped.
-    /// Clear-files is deliberately not this operation: it must not detach a
-    /// still-live chat or delete another member's files.
+    /// No liveness-free destructive overload: callers must hold the ChatStore
+    /// actor from current live-row read through this complete locked operation.
     @discardableResult
-    func releaseDeletedSession(_ id: String) throws -> Bool {
+    func releaseDeletedSession(_ id: String, liveSessionIDs: Set<String>) throws -> Bool {
         lock.lock(); defer { lock.unlock() }
+        _ = try restoreLiveReferences(liveSessionIDs: liveSessionIDs)
+        return try releaseWhileLocked(id, live: Set(liveSessionIDs.map { $0.uppercased() }))
+    }
+
+    private func releaseWhileLocked(_ id: String, live: Set<String>) throws -> Bool {
         guard !loadFailed else { throw Failure.corrupt }
         guard Self.validID(id) else { throw Failure.invalidID }
+        guard !live.contains(id.uppercased()) else { return false }
         try requireDirectory(base)
         let root = state.members[id] ?? state.released[id] ?? id
         var next = state
@@ -180,10 +283,13 @@ final class ContinuationStorageBindings: @unchecked Sendable {
         var removed = false
         if id != root, Self.exists(alias) {
             guard validAlias(alias, root: root) else { throw Failure.unsafePath }
-            try fm.removeItem(at: alias) // remove the link itself, never its target
+            try fm.removeItem(at: alias)
             removed = true
         }
-        if !state.members.values.contains(root) {
+        // SQL liveness independently protects the physical owner, even if an
+        // ownership receipt was stale. In particular: delete A, restore A, then
+        // delete last successor B must NEVER recursively remove restored A.
+        if !live.contains(root.uppercased()), !state.members.values.contains(root) {
             let physical = base.appendingPathComponent(root, isDirectory: true)
             if Self.exists(physical) {
                 try requireDirectory(physical)

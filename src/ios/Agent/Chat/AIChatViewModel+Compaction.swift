@@ -1275,6 +1275,7 @@ extension AIChatViewModel {
                 statusMsg: statusMsg,
                 previousSummary: previousSummaryText
             )
+            guard continuationQueueMayRun(generation: generation) else { return }
             try Task.checkCancellation()
         } catch is CancellationError {
             logger.info("[Compact] Cancelled by user")
@@ -1386,6 +1387,7 @@ extension AIChatViewModel {
         )
         logger.info("[Compact] Persisting v2 marker: id=\(marker.id.prefix(8)) lcmId=\(lastCompactedMessageId.prefix(8)) lcmHistoryIdx=\(lcmHistoryIdx ?? -1)/agentHistory.count=\(self.agentHistory.count) historyCount=\(historyCount) includesBoundary=\(includesBoundary)")
         await ChatStore.shared.insertCompactMarker(marker)
+        guard continuationQueueMayRun(generation: generation) else { return }
 
         // Phase B: update cache so effectiveAgentHistory() starts using the new summary immediately.
         self.cachedLatestMarker = marker

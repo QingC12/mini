@@ -51,7 +51,9 @@ extension ChatStore {
         case updated
         /// Local copy is newer — Merge mode keeps it (§8.2).
         case skippedLocalNewer
-        /// Parent session missing, so the row would dangle.
+        /// Parent session missing, or a session restore SQL write failed.
+        /// Keep the existing failure outcome so importers do not count a failed
+        /// INSERT/UPDATE as restored or need another exhaustive-switch case.
         case skippedNoParent
     }
 
@@ -66,17 +68,34 @@ extension ChatStore {
                         modelBinding: String?) -> RestoreOutcome {
         // FULL: backup restore rewrites rows in bulk and can add sessions.
         invalidateSessionListCache()
+        // Backups deliberately reuse deleted IDs. Only a committed row write
+        // may rebuild ownership or clear Coordinator's deletion fence. In
+        // particular, prepare/step failure is NOT a successful resurrection.
+        var didRestore = false
+        defer {
+            if didRestore {
+                do { try continuationProtectRestoredStorage() }
+                catch { logger.warning("[Restore] Storage ownership protection deferred; destructive cleanup remains fail-closed.") }
+                let restoredID = session.id
+                ContinuationStorageBindings.registry(at: minisBaseURL).enqueueSessionLifecycleNotification {
+                    ContinuationCoordinator.shared.sessionRestored(restoredID)
+                }
+            }
+        }
+        guard let db else { return .skippedNoParent }
 
         let incoming = session.updatedAt.timeIntervalSince1970
         var localUpdatedAt: Double?
         var stmt: OpaquePointer?
-        if sqlite3_prepare_v2(db, "SELECT updated_at FROM sessions WHERE id = ?", -1, &stmt, nil) == SQLITE_OK {
-            sqlite3_bind_text(stmt, 1, (session.id as NSString).utf8String, -1, nil)
-            if sqlite3_step(stmt) == SQLITE_ROW {
-                localUpdatedAt = sqlite3_column_double(stmt, 0)
-            }
+        guard sqlite3_prepare_v2(db, "SELECT updated_at FROM sessions WHERE id = ?", -1, &stmt, nil) == SQLITE_OK else {
+            sqlite3_finalize(stmt)
+            return .skippedNoParent
         }
+        sqlite3_bind_text(stmt, 1, (session.id as NSString).utf8String, -1, nil)
+        let lookup = sqlite3_step(stmt)
+        if lookup == SQLITE_ROW { localUpdatedAt = sqlite3_column_double(stmt, 0) }
         sqlite3_finalize(stmt)
+        guard lookup == SQLITE_ROW || lookup == SQLITE_DONE else { return .skippedNoParent }
 
         if let local = localUpdatedAt {
             guard incoming > local else { return .skippedLocalNewer }
@@ -100,10 +119,10 @@ extension ChatStore {
                 bindText(up, 9, session.parentSessionId)
                 bindText(up, 10, session.parentToolUseId)
                 sqlite3_bind_text(up, 11, (session.id as NSString).utf8String, -1, nil)
-                sqlite3_step(up)
+                didRestore = sqlite3_step(up) == SQLITE_DONE && sqlite3_changes(db) > 0
             }
             sqlite3_finalize(up)
-            return .updated
+            return didRestore ? .updated : .skippedNoParent
         }
 
         // NOTE: remote_origin_device_id is intentionally omitted from the column
@@ -129,10 +148,10 @@ extension ChatStore {
             bindText(ins, 10, session.folderId)
             bindText(ins, 11, session.parentSessionId)
             bindText(ins, 12, session.parentToolUseId)
-            sqlite3_step(ins)
+            didRestore = sqlite3_step(ins) == SQLITE_DONE && sqlite3_changes(db) > 0
         }
         sqlite3_finalize(ins)
-        return .inserted
+        return didRestore ? .inserted : .skippedNoParent
     }
 
     // MARK: - Messages
