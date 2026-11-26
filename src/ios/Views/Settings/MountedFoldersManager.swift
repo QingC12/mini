@@ -180,9 +180,9 @@ final class MountedFoldersManager {
         let current = Self.storeURL
         guard fm.fileExists(atPath: legacy.path) else { return }
         if fm.fileExists(atPath: current.path) {
-            // Current wins — just drop the stale legacy copy.
-            try? fm.removeItem(at: legacy)
-            mountLog.info("migrateStoreFile: removed stale legacy copy at \(legacy.path)")
+            // Keep both: existence does not prove the legacy file is stale.
+            // It remains hidden by FileProvider's metadata blacklist.
+            mountLog.warning("migrateStoreFile: conflict retained at \(legacy.path); current file not overwritten")
             return
         }
         do {

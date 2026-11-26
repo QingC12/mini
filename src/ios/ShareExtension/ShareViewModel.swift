@@ -100,8 +100,11 @@ final class ShareViewModel {
             items = ShareItemRules.merge(existing: existing.items, new: items)
         }
         let share = PendingShare(items: items, timestamp: Date())
-        SharedContainerStore.savePendingShare(share)
-        return true
+        let saved = SharedContainerStore.savePendingShare(share)
+        if !saved {
+            NSLog("[ShareExt] save failed: authorized App Group transport unavailable or persistence failed; no sandbox fallback")
+        }
+        return saved
     }
 
     // MARK: - Processors

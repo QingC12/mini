@@ -1,4 +1,4 @@
-name: iOS device IPA (unsigned)
+name: iOS device IPA (TrollStore and unsigned)
 
 on:
   workflow_dispatch:
@@ -81,7 +81,7 @@ jobs:
           set -o pipefail
           python3 scripts/ci/prepare-deps.py 2>&1 | tee "$CI_OUTPUT_DIR/logs/source-provenance.log"
 
-      - name: Run policy, provider, storage, reliability, router and stop checks plus syntax
+      - name: Run all ten required startup, signing and continuation suites
         run: python3 scripts/ci/run-tests.py
 
       - name: Compute native cache identity
@@ -123,7 +123,7 @@ jobs:
             deps/resources
           key: ${{ steps.native-key.outputs.key }}
 
-      - name: Compile real iOS device app and package unsigned IPA
+      - name: Compile real iOS device app and package unsigned and TrollStore IPAs
         run: |
           set -o pipefail
           bash scripts/ci/build-ipa.sh 2>&1 | tee "$CI_OUTPUT_DIR/logs/ipa.log"
@@ -138,6 +138,16 @@ jobs:
             build/ci/artifacts/SHA256SUMS
             build/ci/artifacts/BUILD-INFO.json
             build/ci/artifacts/UNSIGNED-NOT-INSTALLABLE.txt
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+      - name: Upload verified TrollStore IPA with embedded App Group entitlements
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Minis-TrollStore-arm64-${{ github.sha }}
+          path: build/ci/artifacts/trollstore/
           if-no-files-found: error
           retention-days: 14
           compression-level: 0

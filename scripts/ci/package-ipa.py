@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify real Mach-O iOS output, then create an explicitly unsigned IPA."""
+"""Verify real iOS output; emit separate unsigned and TrollStore ad-hoc IPAs."""
 import hashlib
 import json
 import os
@@ -144,3 +144,8 @@ with (ART / 'SHA256SUMS').open('w') as sums:
         sums.write(f'{digest}  {path.name}\n')
 (OUT / 'reports/ipa-validation.json').write_text(json.dumps({'valid': True, **info}, indent=2) + '\n')
 print(f'Validated unsigned iOS arm64 IPA: {ipa.name} ({ipa.stat().st_size} bytes); NOT directly installable.')
+# Keep the deliberately unsigned channel untouched. The distinct TrollStore
+# channel MUST contain real ad-hoc seals and per-target embedded entitlements.
+subprocess.run([sys.executable, str(ROOT / 'scripts/ci/trollstore-package.py'),
+                str(payload / app.name), '--output', str(OUT),
+                '--source-root', str(ROOT)], check=True)

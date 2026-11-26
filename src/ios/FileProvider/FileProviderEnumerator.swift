@@ -5,9 +5,11 @@ import os.log
 final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator {
     private let containerItemIdentifier: NSFileProviderItemIdentifier
     private let recursive: Bool
+    private let providerRoot: URL
     private static let log = OSLog(subsystem: "com.openminis.app.FileProvider", category: "Enumerator")
 
-    init(containerItemIdentifier: NSFileProviderItemIdentifier, recursive: Bool = false) {
+    init(providerRoot: URL, containerItemIdentifier: NSFileProviderItemIdentifier, recursive: Bool = false) {
+        self.providerRoot = providerRoot
         self.containerItemIdentifier = containerItemIdentifier
         self.recursive = recursive
         super.init()
@@ -104,9 +106,9 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator {
 
     private func directoryURL() -> URL {
         if containerItemIdentifier == .rootContainer {
-            return FileProviderExtension.providerRoot
+            return providerRoot
         }
-        return FileProviderExtension.providerRoot
+        return providerRoot
             .appendingPathComponent(containerItemIdentifier.rawValue)
     }
 
@@ -158,7 +160,7 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator {
         }
 
         return contents.map { url in
-            FileProviderItem(url: url, parentIdentifier: containerItemIdentifier)
+            FileProviderItem(url: url, providerRoot: providerRoot, parentIdentifier: containerItemIdentifier)
         }
     }
 
@@ -176,7 +178,7 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator {
         // Defensive: same reserved-identifier filter as the non-recursive path.
         contents = contents.filter { !Self.isHiddenMetadata($0.lastPathComponent) }
 
-        let rootURL = FileProviderExtension.providerRoot
+        let rootURL = providerRoot
         // At the provider root, apply the same hidden-folder filter as the
         // non-recursive path so hidden top-level subdirs don't leak into the
         // working set when iOS Files enumerates recursively.
@@ -194,7 +196,7 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator {
         let root = rootURL.path
         var items: [FileProviderItem] = []
         for url in contents {
-            let item = FileProviderItem(url: url, parentIdentifier: parentIdentifier)
+            let item = FileProviderItem(url: url, providerRoot: providerRoot, parentIdentifier: parentIdentifier)
             items.append(item)
 
             var isDir: ObjCBool = false

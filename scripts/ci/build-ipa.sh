@@ -25,6 +25,7 @@ xcodebuild -project src/ios/Minis.xcodeproj -scheme Minis \
   -disableAutomaticPackageResolution \
   -resultBundlePath "$OUT/app-build.xcresult" \
   ARCHS=arm64 ONLY_ACTIVE_ARCH=YES IPHONEOS_DEPLOYMENT_TARGET=17.0 \
+  CURRENT_PROJECT_VERSION=2 \
   CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= \
   DEVELOPMENT_TEAM= COMPILER_INDEX_STORE_ENABLE=NO \
   build 2>&1 | tee "$OUT/logs/xcodebuild.log"

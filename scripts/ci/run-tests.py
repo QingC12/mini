@@ -22,6 +22,15 @@ OUT = Path(os.environ.get('CI_OUTPUT_DIR', ROOT / 'build/ci'))
 (OUT / 'reports').mkdir(parents=True, exist_ok=True)
 # Parse the feature files even if a later push changes only a test/document.
 feature_paths = [
+    'Agent/Chat/AIChatViewModel+RequestBudget.swift',
+    'Shared/SharedContainerStore.swift',
+    'Shared/AppGroupStoragePaths.swift',
+    'FileProvider/AppGroupChangeWatcher.swift',
+    'FileProvider/FileProviderExtension.swift',
+    'FileProvider/FileProviderEnumerator.swift',
+    'FileProvider/FileProviderItem.swift',
+    'ShareExtension/ShareViewModel.swift',
+    'MinisApp.swift',
     'Agent/Chat/AIChatViewModel+AgentLoop.swift',
     'Agent/Chat/AIChatViewModel+PromptQueue.swift',
     'Agent/Chat/ChatLifecycleSupport.swift',
@@ -76,11 +85,13 @@ for name, path in (
     ('continuation-reliability', 'tests/run_continuation_reliability_tests.sh'),
     ('continuation-router', 'tests/run_continuation_router_tests.sh'),
     ('continuation-stop', 'tests/run_continuation_stop_tests.sh'),
+    ('app-group-startup', 'scripts/run_app_group_startup_tests.sh'),
     ('continuation-slot', 'tests/run_continuation_slot_tests.sh'),
 ):
     # Required gates in both workflows: a deleted/missing runner must fail,
     # never silently lower the suite count and let an IPA through.
     cases.append((name, ['sh', path]))
+cases.append(('trollstore-package-policy', [sys.executable, 'scripts/ci/test-trollstore-package.py']))
 suite = ET.Element('testsuite', name='Minis standalone Swift', tests=str(len(cases)))
 failures = 0
 summary = []

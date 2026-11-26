@@ -45,6 +45,10 @@ final class AppGroupChangeWatcher {
     /// Start watching the three exposed roots. Idempotent — calling twice is a no-op.
     func start() {
         guard !started else { return }
+        guard AIChatViewModel.minisStoragePaths.appGroupContainer != nil else {
+            logger.warning("[SharedStorage] FileProvider watcher unavailable in main-app local-only mode")
+            return
+        }
         started = true
 
         let fm = FileManager.default

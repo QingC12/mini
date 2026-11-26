@@ -7,27 +7,32 @@ enum SharedContainerStore {
 
     private static let pendingShareKey = "pendingShare"
 
+    /// Resolve once in each process; nil never becomes an extension-private path.
+    static let appGroupContainer: URL? = FileManager.default
+        .containerURL(forSecurityApplicationGroupIdentifier: appGroupID)
+
     static var sharedDefaults: UserDefaults? {
-        UserDefaults(suiteName: appGroupID)
+        // A suite name alone does not prove sharing is authorized. Never turn
+        // an extension's private defaults into an apparently shared transport.
+        guard sharedFileDirectory != nil else { return nil }
+        return UserDefaults(suiteName: appGroupID)
     }
 
     /// Directory in the shared container for transferring attachment files.
     static var sharedFileDirectory: URL? {
-        FileManager.default
-            .containerURL(forSecurityApplicationGroupIdentifier: appGroupID)?
-            .appendingPathComponent("ShareExtension", isDirectory: true)
+        appGroupContainer?.appendingPathComponent("ShareExtension", isDirectory: true)
     }
 
     // MARK: - Write (called by Share Extension)
 
-    static func savePendingShare(_ share: PendingShare) {
-        guard let defaults = sharedDefaults else { return }
+    @discardableResult
+    static func savePendingShare(_ share: PendingShare) -> Bool {
+        guard let defaults = sharedDefaults else { return false }
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
-        if let data = try? encoder.encode(share) {
-            defaults.set(data, forKey: pendingShareKey)
-            defaults.synchronize()
-        }
+        guard let data = try? encoder.encode(share) else { return false }
+        defaults.set(data, forKey: pendingShareKey)
+        return defaults.synchronize()
     }
 
     // MARK: - Read & Consume (called by main app)

@@ -169,6 +169,12 @@ struct MinisApp: App {
         // @State initializer (evaluated at ContentView instantiation, before any
         // .onAppear refresh) locks the sidebar title to the default even when the
         // user set a custom name. refreshCache() only reads the tiny SOUL.md file.
+        // Missing App Group entitlement must not trap before the first scene.
+        // Prepare the main-app fallback before SOUL or any other root consumer.
+        Self.prepareSharedStorageForLaunch()
+        if AIChatViewModel.minisStoragePaths.isUsingLocalFallback {
+            SoulStore.ensureExists()
+        }
         SoulStore.refreshCache()
         // Pre-warm KaTeX WKWebView as fallback for formulas SwiftMath can't render
         KaTeXRenderer.shared.warmUp()
@@ -226,7 +232,17 @@ struct MinisApp: App {
             ZStack {
                 ContentView()
                     .overlay(alignment: .top) {
-                        BackgroundInterruptionBanner()
+                        VStack(spacing: 4) {
+                            BackgroundInterruptionBanner()
+                            if let message = Self.sharedStorageNotice {
+                                Text(message)
+                                    .font(.footnote)
+                                    .padding(8)
+                                    .frame(maxWidth: .infinity)
+                                    .background(.regularMaterial)
+                                    .accessibilityIdentifier("shared-storage-recovery-notice")
+                            }
+                        }
                     }
                 AudioPiPCapsule()
                 // Global read-replies capsule — a SINGLE app-root instance driven by
@@ -439,10 +455,11 @@ struct MinisApp: App {
                     NetworkMonitor.shared.start()
                     // [T-provider-quota] Foreground-only upstream quota refresh.
                     QuotaStore.shared.start()
+                    // Migrate before registration seeds a default SOUL.md;
+                    // otherwise an old personalized SOUL would be a conflict.
+                    Self.migrateSharedDirToAppGroup()
                     // Register FileProvider domain for shared files
                     Self.registerFileProviderDomain()
-                    // Migrate legacy shared dir to App Group container
-                    Self.migrateSharedDirToAppGroup()
                     // Trace the resolved AppGroup paths so we can confirm the
                     // main app, FileProvider extension, and iSH bind mount all
                     // agree on which directory holds the user's shared files.
@@ -818,7 +835,36 @@ struct MinisApp: App {
         lifecycleLog.info("[FPSyncTrace] app-updated old=\(previous ?? "none") new=\(current) mac=\(onMac)")
     }
 
+    /// Remains visible on every launch until an explicit recovery is performed.
+    /// The fallback tree and the JSON notice are never auto-deleted.
+    private static var sharedStorageNotice: String?
+
+    /// Lightweight directory preparation only; never bulk-copy user data while
+    /// creating the scene. Recovered entitlements must not silently orphan local
+    /// fallback data or overwrite newer files in the real group.
+    private static func prepareSharedStorageForLaunch() {
+        let paths = AIChatViewModel.minisStoragePaths
+        if paths.isUsingLocalFallback {
+            sharedStorageNotice = "Shared storage unavailable. Files are kept locally on this device; Share and Files integration are unavailable."
+            lifecycleLog.warning("[SharedStorage] App Group unavailable; persistent main-app-only fallback=\(paths.fallbackContainer.path). FileProvider and Share transport unavailable; no extension fallback.")
+        }
+        do {
+            if let retained = try paths.prepare() {
+                sharedStorageNotice = "Shared storage restored. Earlier local files are retained separately in Library/MinisLocalStorage; automatic merging is disabled. Recover those files before removing the app."
+                lifecycleLog.warning("[SharedStorage] LOCAL_STORAGE_RECOVERY_REQUIRED retained=\(retained.retainedContainerPath) active=\(retained.activeContainerPath); original local files preserved, NOT auto-merged. See MinisConfig/local-storage-recovery.json.")
+            }
+        } catch {
+            sharedStorageNotice = "Storage setup needs attention. Existing files were retained; storage may be unavailable. \(error.localizedDescription)"
+            lifecycleLog.error("[SharedStorage] directory preparation/recovery notice failed: \(error.localizedDescription); no user data removed")
+        }
+    }
+
     private static func registerFileProviderDomain() {
+        // The main app may use its own sandbox; the extension cannot share it.
+        guard AIChatViewModel.minisStoragePaths.appGroupContainer != nil else {
+            lifecycleLog.warning("[FileProvider] registration skipped: App Group unavailable (main app is in local-only storage mode)")
+            return
+        }
         logAppUpdateMarkerForFPTrace()
 
         // [T-ios-fp-mac-bootcrash] Circuit breaker, NOT a blanket disable.
@@ -1183,8 +1229,12 @@ struct MinisApp: App {
     /// 4. Old App Group MinisShared/ → App Group MinisFileProvider/shared/
     private static func migrateSharedDirToAppGroup() {
         let fm = FileManager.default
-        let library = fm.urls(for: .libraryDirectory, in: .userDomainMask).first!
-        let container = fm.containerURL(forSecurityApplicationGroupIdentifier: "group.com.openminis.app")!
+        let paths = AIChatViewModel.minisStoragePaths
+        guard let container = paths.appGroupContainer,
+              let library = fm.urls(for: .libraryDirectory, in: .userDomainMask).first else {
+            lifecycleLog.warning("[SharedStorage] legacy App Group migration skipped; source data retained (no authorized group/library)")
+            return
+        }
 
         let migrations: [(source: URL, dest: URL, label: String)] = [
             // Legacy Library/MinisChat/shared → new shared
@@ -1202,20 +1252,16 @@ struct MinisApp: App {
         ]
 
         for migration in migrations {
-            guard fm.fileExists(atPath: migration.source.path) else { continue }
-            try? fm.createDirectory(at: migration.dest, withIntermediateDirectories: true)
-            guard let contents = try? fm.contentsOfDirectory(at: migration.source, includingPropertiesForKeys: nil) else { continue }
-            for item in contents {
-                let dest = migration.dest.appendingPathComponent(item.lastPathComponent)
-                if !fm.fileExists(atPath: dest.path) {
-                    try? fm.moveItem(at: item, to: dest)
+            do {
+                let result = try paths.migrateLegacyDirectory(from: migration.source, to: migration.dest)
+                if result.retainedConflicts > 0 {
+                    lifecycleLog.warning("[SharedStorage] legacy migration \(migration.label): moved=\(result.moved), conflicts retained at \(migration.source.path)=\(result.retainedConflicts); destination files NOT overwritten")
+                } else if result.moved > 0 {
+                    lifecycleLog.info("[SharedStorage] migrated \(migration.label) to App Group: moved=\(result.moved)")
                 }
+            } catch {
+                lifecycleLog.error("[SharedStorage] legacy migration \(migration.label) incomplete: \(error.localizedDescription); unmoved source data retained")
             }
-            // Remove old directory if empty
-            if (try? fm.contentsOfDirectory(at: migration.source, includingPropertiesForKeys: nil))?.isEmpty ?? true {
-                try? fm.removeItem(at: migration.source)
-            }
-            lifecycleLog.info("[FileProvider] migrated \(migration.label) to App Group")
         }
     }
 
@@ -1226,7 +1272,7 @@ struct MinisApp: App {
     private static func logFPSyncTracePaths() {
         let fm = FileManager.default
         let groupID = "group.com.openminis.app"
-        let containerURL = fm.containerURL(forSecurityApplicationGroupIdentifier: groupID)
+        let containerURL = AIChatViewModel.minisStoragePaths.appGroupContainer
         let containerPath = containerURL?.path ?? "<nil>"
         let resolvedContainer = containerURL?.resolvingSymlinksInPath().path ?? "<nil>"
         lifecycleLog.info("[FPSyncTrace] appGroup=\(groupID) container=\(containerPath) resolved=\(resolvedContainer)")

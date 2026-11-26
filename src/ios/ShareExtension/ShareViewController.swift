@@ -29,6 +29,15 @@ class ShareViewController: UIViewController {
         super.viewDidLoad()
         view.backgroundColor = .clear
         NSLog("[ShareExt] viewDidLoad — starting processing")
+        guard SharedContainerStore.appGroupContainer != nil else {
+            finished = true
+            NSLog("[ShareExt] authorized App Group unavailable; refusing private-container fallback")
+            extensionContext?.cancelRequest(withError: NSError(
+                domain: "com.openminis.app.ShareExtension", code: 2,
+                userInfo: [NSLocalizedDescriptionKey:
+                    "Minis shared storage is unavailable. Sharing requires an authorized App Group; nothing was saved."]))
+            return
+        }
 
         Task { @MainActor in
             let vm = ShareViewModel()
