@@ -32,6 +32,7 @@ extension AIChatViewModel {
     ///   the text here keeps a background turn from reading, overwriting, or
     ///   emptying whatever the user is typing at that moment.
     func send(overrideText: String? = nil) {
+        guard !continuationQueueFence.isDeleted, !ContinuationCoordinator.shared.isDeletedSession(sessionId) else { return }
         settlePendingStop(before: "send")  // [T-stop-cleanup-before-new-turn]
         // Read-only mode — cannot send messages
         guard remoteDeviceId == nil else { return }
@@ -73,7 +74,11 @@ extension AIChatViewModel {
             return
         }
 
-        if usingComposer { ContinuationCoordinator.shared.userBeganRequest(sessionId) }
+        if usingComposer {
+            guard ContinuationCoordinator.shared.userBeganRequest(sessionId),
+                  reopenContinuationQueueForExplicitUserRequest() else { return }
+        }
+        guard continuationQueueMayRun else { return }
 
         // Don't stop TTS here — let the previous reply finish playing. The stream
         // handler will clear the queue on the FIRST textDelta of the new reply, so
@@ -266,11 +271,13 @@ extension AIChatViewModel {
         ensureKernelBooted()
         beginBackgroundProcessing()
 
+        let generation = continuationQueueFence.generation
         currentTask = Task { [weak self] in
-            guard let self else { return }
+            guard let self, self.continuationQueueMayRun(generation: generation) else { return }
 
             // Lazily create session before persisting anything
             await self.ensureSession()
+            guard self.continuationQueueMayRun(generation: generation) else { return }
 
             // Defensive: ensure tracker reflects the real session ID after draft→real migration.
             if let sid = self.sessionId, self.isProcessing {
@@ -534,7 +541,7 @@ extension AIChatViewModel {
             // Concurrency gate: wait for a processing slot
             guard let slotLease = await self.acquireSessionSlot(sid) else { return }
             defer { SessionConcurrencyManager.shared.release(slotLease) }
-            guard !Task.isCancelled, !self.turnWasStopped else { return }
+            guard self.continuationQueueMayRun(generation: generation), !self.turnWasStopped else { return }
 
             do {
                 try await self.runAgentLoop()
@@ -583,18 +590,20 @@ extension AIChatViewModel {
             // the superseded task would drain concurrently and force
             // isProcessing=false mid-run — the chat stops rendering the live tool
             // loop while the preview bar / Live Activity keep updating.
-            guard !Task.isCancelled else {
+            guard self.continuationQueueMayRun(generation: generation) else {
                 logger.info("🔄SESSION [vm=\(self.vmInstanceId)] send epilogue skipped (task cancelled) session=\(self.sessionId ?? "nil")")
                 return
             }
 
             await self.drainQueuedPrompts()
+            guard self.continuationQueueMayRun(generation: generation) else { return }
 
             // Refresh lastKnownDbSortOrder from the actual DB so iCloud sync
             // doesn't mistake our own persisted messages for remote ones.
             // The in-memory += 1 tracking can drift if messages are batched or retried.
             if let sid = self.sessionId {
                 let dbMessages = await ChatStore.shared.loadMessages(sessionId: sid)
+                guard self.continuationQueueMayRun(generation: generation) else { return }
                 self.lastKnownDbSortOrder = dbMessages.last?.sortOrder ?? self.lastKnownDbSortOrder
                 self.lastKnownDbCount = dbMessages.count
                 // T-baseline-hash-drift: also refresh lastKnownDbOrderHash —
@@ -615,10 +624,12 @@ extension AIChatViewModel {
     /// Retry the next agent loop iteration (continue from where the error occurred,
     /// keeping all previously completed tool blocks and conversation history).
     func retry() {
+        guard !continuationQueueFence.isDeleted, !ContinuationCoordinator.shared.isDeletedSession(sessionId) else { return }
         settlePendingStop(before: "retry")  // [T-stop-cleanup-before-new-turn]
         guard !isProcessing else { return }
         guard let lastMsg = messages.last, lastMsg.role == .assistant else { return }
-        ContinuationCoordinator.shared.userBeganRequest(sessionId)
+        guard ContinuationCoordinator.shared.userBeganRequest(sessionId),
+              reopenContinuationQueueForExplicitUserRequest(), continuationQueueMayRun else { return }
 
         // [T-ios-retry-keyboard] This turn exists because the user re-sent an
         // old failure, so its completion must not be treated as "a reply
@@ -740,14 +751,15 @@ extension AIChatViewModel {
         ensureKernelBooted()
         beginBackgroundProcessing()
 
+        let generation = continuationQueueFence.generation
         currentTask = Task { [weak self] in
-            guard let self else { return }
+            guard let self, self.continuationQueueMayRun(generation: generation) else { return }
 
             while self.kernelStatus == .booting {
-                guard !Task.isCancelled, !self.turnWasStopped else { return }
+                guard self.continuationQueueMayRun(generation: generation), !self.turnWasStopped else { return }
                 try? await Task.sleep(nanoseconds: 100_000_000)
             }
-            guard !Task.isCancelled, !self.turnWasStopped else { return }
+            guard self.continuationQueueMayRun(generation: generation), !self.turnWasStopped else { return }
             if case .failed(let msg) = self.kernelStatus {
                 self.errorMessage = "Kernel not available: \(msg)"
                 self.isProcessing = false
@@ -759,7 +771,7 @@ extension AIChatViewModel {
             let retrySid = self.sessionId ?? "unknown"
             guard let slotLease = await self.acquireSessionSlot(retrySid) else { return }
             defer { SessionConcurrencyManager.shared.release(slotLease) }
-            guard !Task.isCancelled, !self.turnWasStopped else { return }
+            guard self.continuationQueueMayRun(generation: generation), !self.turnWasStopped else { return }
 
             do {
                 try await self.runAgentLoop(resumingAt: existingMsgIdx, committedBlocks: existingBlockCount)
@@ -800,11 +812,12 @@ extension AIChatViewModel {
             if self.userDidCancel { self.handleUserCancelledCleanup() }
             // [T-stop-with-queue-render-desync] See send(): Stop's cancel() owns
             // state teardown; a superseded task must not drain or flip isProcessing.
-            guard !Task.isCancelled else {
+            guard self.continuationQueueMayRun(generation: generation) else {
                 logger.info("🔄SESSION [vm=\(self.vmInstanceId)] retry epilogue skipped (task cancelled) session=\(self.sessionId ?? "nil")")
                 return
             }
             await self.drainQueuedPrompts()
+            guard self.continuationQueueMayRun(generation: generation) else { return }
             logger.info("🔄SESSION [vm=\(self.vmInstanceId)] retry DONE session=\(self.sessionId ?? "nil")")
             self.playCompletionHaptic()
             self.isProcessing = false
@@ -815,9 +828,11 @@ extension AIChatViewModel {
     /// Resume an interrupted agent loop. Injects a "Continue" user message
     /// into agentHistory so the model knows to pick up where it left off.
     func resume() {
+        guard !continuationQueueFence.isDeleted, !ContinuationCoordinator.shared.isDeletedSession(sessionId) else { return }
         settlePendingStop(before: "resume")  // [T-stop-cleanup-before-new-turn]
         guard !isProcessing, canResume else { return }
-        ContinuationCoordinator.shared.userBeganRequest(sessionId)
+        guard ContinuationCoordinator.shared.userBeganRequest(sessionId),
+              reopenContinuationQueueForExplicitUserRequest(), continuationQueueMayRun else { return }
         // [T-ios-orphan-user-tail GH#262/#263] A tail of "user turn with no
         // reply at all" has no assistant row to resume INTO — the reply never
         // reached the store, so loadSession rebuilt the transcript ending on
@@ -889,14 +904,15 @@ extension AIChatViewModel {
         ensureKernelBooted()
         beginBackgroundProcessing()
 
+        let generation = continuationQueueFence.generation
         currentTask = Task { [weak self] in
-            guard let self else { return }
+            guard let self, self.continuationQueueMayRun(generation: generation) else { return }
 
             while self.kernelStatus == .booting {
-                guard !Task.isCancelled, !self.turnWasStopped else { return }
+                guard self.continuationQueueMayRun(generation: generation), !self.turnWasStopped else { return }
                 try? await Task.sleep(nanoseconds: 100_000_000)
             }
-            guard !Task.isCancelled, !self.turnWasStopped else { return }
+            guard self.continuationQueueMayRun(generation: generation), !self.turnWasStopped else { return }
             if case .failed(let msg) = self.kernelStatus {
                 self.errorMessage = "Kernel not available: \(msg)"
                 self.isProcessing = false
@@ -907,7 +923,7 @@ extension AIChatViewModel {
             let resumeSid = self.sessionId ?? "unknown"
             guard let slotLease = await self.acquireSessionSlot(resumeSid) else { return }
             defer { SessionConcurrencyManager.shared.release(slotLease) }
-            guard !Task.isCancelled, !self.turnWasStopped else { return }
+            guard self.continuationQueueMayRun(generation: generation), !self.turnWasStopped else { return }
 
             do {
                 try await self.runAgentLoop(resumingAt: existingMsgIdx, committedBlocks: existingBlockCount)
@@ -948,16 +964,18 @@ extension AIChatViewModel {
             if self.userDidCancel { self.handleUserCancelledCleanup() }
             // [T-stop-with-queue-render-desync] See send(): Stop's cancel() owns
             // state teardown; a superseded task must not drain or flip isProcessing.
-            guard !Task.isCancelled else {
+            guard self.continuationQueueMayRun(generation: generation) else {
                 logger.info("🔄SESSION [vm=\(self.vmInstanceId)] resume epilogue skipped (task cancelled) session=\(self.sessionId ?? "nil")")
                 return
             }
             await self.drainQueuedPrompts()
+            guard self.continuationQueueMayRun(generation: generation) else { return }
             // Same baseline refresh as send()'s epilogue. Without it the rows the
             // resumed loop wrote looked like another writer's: the next reload
             // rebuilt the whole chat (FD704863, 12:45:55 "LOAD branch=
             // hasRemovedMessages knownCount=2050 dbCount=2048").
             await self.refreshDbBaselineFromStore()
+            guard self.continuationQueueMayRun(generation: generation) else { return }
             logger.info("🔄SESSION [vm=\(self.vmInstanceId)] resume DONE session=\(self.sessionId ?? "nil")")
             self.playCompletionHaptic()
             self.isProcessing = false
@@ -990,8 +1008,13 @@ extension AIChatViewModel {
     /// hidden user row the caller just appended to agentHistory (the user_ask
     /// Retry), so the visible transcript ends on the assistant instead.
     func resumeUnansweredUserTurn(afterHiddenNudge: Bool = false, forContinuation: Bool = false) {
+        guard !continuationQueueFence.isDeleted, !ContinuationCoordinator.shared.isDeletedSession(sessionId) else { return }
         guard !isProcessing, !isCompacting, remoteDeviceId == nil else { return }
-        if !forContinuation { ContinuationCoordinator.shared.userBeganRequest(sessionId) }
+        if !forContinuation && !afterHiddenNudge {
+            guard ContinuationCoordinator.shared.userBeganRequest(sessionId),
+                  reopenContinuationQueueForExplicitUserRequest() else { return }
+        }
+        guard continuationQueueMayRun else { return }
         settlePendingStop(before: "resumeUnansweredUserTurn")  // [T-stop-cleanup-before-new-turn]
         if !afterHiddenNudge {
             guard let lastUser = messages.last, lastUser.role == .user else { return }
@@ -1017,14 +1040,15 @@ extension AIChatViewModel {
         ensureKernelBooted()
         beginBackgroundProcessing()
 
+        let generation = continuationQueueFence.generation
         currentTask = Task { [weak self] in
-            guard let self else { return }
+            guard let self, self.continuationQueueMayRun(generation: generation) else { return }
 
             while self.kernelStatus == .booting {
-                guard !Task.isCancelled, !self.turnWasStopped else { return }
+                guard self.continuationQueueMayRun(generation: generation), !self.turnWasStopped else { return }
                 try? await Task.sleep(nanoseconds: 100_000_000)
             }
-            guard !Task.isCancelled, !self.turnWasStopped else { return }
+            guard self.continuationQueueMayRun(generation: generation), !self.turnWasStopped else { return }
             if case .failed(let msg) = self.kernelStatus {
                 self.errorMessage = "Kernel not available: \(msg)"
                 self.isProcessing = false
@@ -1035,7 +1059,7 @@ extension AIChatViewModel {
             let sid = self.sessionId ?? "unknown"
             guard let slotLease = await self.acquireSessionSlot(sid) else { return }
             defer { SessionConcurrencyManager.shared.release(slotLease) }
-            guard !Task.isCancelled, !self.turnWasStopped else { return }
+            guard self.continuationQueueMayRun(generation: generation), !self.turnWasStopped else { return }
 
             do {
                 try await self.runAgentLoop()
@@ -1062,11 +1086,12 @@ extension AIChatViewModel {
                 }
             }
             if self.userDidCancel { self.handleUserCancelledCleanup() }
-            guard !Task.isCancelled else {
+            guard self.continuationQueueMayRun(generation: generation) else {
                 logger.info("🔄SESSION [vm=\(self.vmInstanceId)] orphan-tail resume epilogue skipped (task cancelled) session=\(self.sessionId ?? "nil")")
                 return
             }
             await self.drainQueuedPrompts()
+            guard self.continuationQueueMayRun(generation: generation) else { return }
             logger.info("🔄SESSION [vm=\(self.vmInstanceId)] orphan-tail resume DONE session=\(self.sessionId ?? "nil")")
             self.playCompletionHaptic()
             self.isProcessing = false

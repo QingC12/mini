@@ -35,9 +35,19 @@ extension AIChatViewModel {
     /// Resume queue processing after the user stopped the current task.
     /// Spawns a fresh Task (not cancelled) so the drain loop can call runAgentLoop().
     func resumeQueueAfterCancel() {
+        guard continuationQueueMayRun, !ContinuationCoordinator.shared.hasPendingHandoff(for: sessionId) else { return }
+        let generation = continuationQueueFence.generation
         // Small delay to let the cancelled task's error handler finish cleanup.
-        currentTask = Task { @MainActor [weak self] in
-            guard let self else { return }
+        let task = Task { @MainActor [weak self] in
+            guard let self, self.continuationQueueMayRun(generation: generation) else { return }
+            defer {
+                if self.continuationQueueFence.generation == generation {
+                    self.idleDrainTask = nil
+                    if self.continuationQueueMayRun(generation: generation), !self.userDidCancel, !self.promptQueue.isEmpty {
+                        self.startDrainIfIdle(reason: "queue-task-released")
+                    }
+                }
+            }
             // Wait briefly for the previous task to complete cleanup
             try? await Task.sleep(nanoseconds: 200_000_000) // 200ms
             // [T-double-stop-empty-bubble] A second Stop inside this wait
@@ -46,10 +56,12 @@ extension AIChatViewModel {
             // (cleaning it twice) and drain the queue inside a cancelled task,
             // racing the drain the second Stop spawns. That Stop's cancel()
             // owns the handover now — leave everything to it.
-            guard !Task.isCancelled else {
+            guard self.continuationQueueMayRun(generation: generation) else {
                 logger.info("📨[DRAIN] queue-resume superseded by another Stop during the settle wait — handing over")
                 return
             }
+            guard self.continuationQueueMayRun(generation: generation),
+                  !ContinuationCoordinator.shared.hasPendingHandoff(for: self.sessionId) else { return }
             self.handleUserCancelledCleanup()
             self.userDidCancel = false
             // [T-stop-with-queue-render-desync] handleUserCancelledCleanup (run
@@ -67,13 +79,14 @@ extension AIChatViewModel {
             // [T-stop-with-queue-render-desync] A second Stop during this drained
             // run cancels THIS task and may spawn yet another drain task — same
             // handover as send()'s epilogue, so don't clobber its state either.
-            guard !Task.isCancelled else {
+            guard self.continuationQueueMayRun(generation: generation) else {
                 logger.info("📨[DRAIN] queue-resume epilogue skipped (task cancelled) session=\(self.sessionId ?? "nil")")
                 return
             }
 
             if let sid = self.sessionId {
                 let dbMessages = await ChatStore.shared.loadMessages(sessionId: sid)
+                guard self.continuationQueueMayRun(generation: generation) else { return }
                 self.lastKnownDbSortOrder = dbMessages.last?.sortOrder ?? self.lastKnownDbSortOrder
                 self.lastKnownDbCount = dbMessages.count
                 // T-baseline-hash-drift: see send DONE path for why hash
@@ -83,6 +96,8 @@ extension AIChatViewModel {
             self.isProcessing = false
             self.endBackgroundProcessing()
         }
+        idleDrainTask = task
+        currentTask = task
     }
 
     /// [T-p0-programmatic-prompt] Start a drain when NO loop is running.
@@ -97,6 +112,8 @@ extension AIChatViewModel {
     /// The isProcessing didSet calls this on the flip; callers may also call it
     /// directly. Mirrors resumeQueueAfterCancel minus the cancel bookkeeping.
     func startDrainIfIdle(reason: String) {
+        guard continuationQueueMayRun, !Task.isCancelled, idleDrainTask == nil else { return }
+        let generation = continuationQueueFence.generation
         guard !ContinuationCoordinator.shared.hasPendingHandoff(for: sessionId) else { return }
         guard remoteDeviceId == nil else { return }
         guard !isProcessing, !isDrainingQueue, !isCompacting, !postCompactDrainPending else {
@@ -105,8 +122,18 @@ extension AIChatViewModel {
         }
         guard !promptQueue.isEmpty else { return }
         logger.info("📨[DRAIN] startDrainIfIdle(\(reason)) — \(self.promptQueue.count) prompt(s), no loop running")
-        currentTask = Task { @MainActor [weak self] in
-            guard let self else { return }
+        let task = Task { @MainActor [weak self] in
+            guard let self, self.continuationQueueMayRun(generation: generation) else { return }
+            defer {
+                if self.continuationQueueFence.generation == generation {
+                    self.idleDrainTask = nil
+                    if self.continuationQueueMayRun(generation: generation), !self.userDidCancel, !self.promptQueue.isEmpty {
+                        self.startDrainIfIdle(reason: "queue-task-released")
+                    }
+                }
+            }
+            guard self.continuationQueueMayRun(generation: generation),
+                  !ContinuationCoordinator.shared.hasPendingHandoff(for: self.sessionId) else { return }
             self.settlePendingStop(before: "startDrainIfIdle")
             self.userDidCancel = false
             self.canResume = false
@@ -119,12 +146,13 @@ extension AIChatViewModel {
             await self.drainQueuedPrompts()
             // Same stop-handover rule as every other epilogue: a Stop during
             // the drained run hands state ownership to cancel().
-            guard !Task.isCancelled else {
+            guard self.continuationQueueMayRun(generation: generation) else {
                 logger.info("📨[DRAIN] idle-drain epilogue skipped (task cancelled) session=\(self.sessionId ?? "nil")")
                 return
             }
             if let sid = self.sessionId {
                 let dbMessages = await ChatStore.shared.loadMessages(sessionId: sid)
+                guard self.continuationQueueMayRun(generation: generation) else { return }
                 self.lastKnownDbSortOrder = dbMessages.last?.sortOrder ?? self.lastKnownDbSortOrder
                 self.lastKnownDbCount = dbMessages.count
                 self.lastKnownDbOrderHash = Self.computeOrderHash(of: dbMessages)
@@ -134,6 +162,8 @@ extension AIChatViewModel {
             self.isProcessing = false
             self.endBackgroundProcessing()
         }
+        idleDrainTask = task
+        currentTask = task
     }
 
     /// Drain any queued prompts after an agent loop finishes.
@@ -149,6 +179,8 @@ extension AIChatViewModel {
     /// `internal` (not `private`) so `compactAndSend` in the +Compaction
     /// extension file can drain through this same path after a compact.
     func drainQueuedPrompts() async {
+        let generation = continuationQueueFence.generation
+        guard continuationQueueMayRun(generation: generation) else { return }
         guard !ContinuationCoordinator.shared.hasPendingHandoff(for: sessionId) else { return }
         guard !self.isDrainingQueue else {
             logger.info("📨[DRAIN] Already draining in another task — skipping duplicate drain")
@@ -162,31 +194,37 @@ extension AIChatViewModel {
             return
         }
         self.isDrainingQueue = true
+        self.queueDrainGeneration = generation
         defer {
-            self.isDrainingQueue = false
-            // [T-queue-drain-handover] Hand the skipped request on now that the
-            // guard is free. startDrainIfIdle is a no-op while a loop still
-            // runs (that loop's own epilogue / isProcessing rescue drains).
-            if self.drainRequestedWhileBusy {
-                self.drainRequestedWhileBusy = false
-                if !self.promptQueue.isEmpty {
-                    self.startDrainIfIdle(reason: "drain-handover")
+            // Stop/reopen can already have granted the latch to another task.
+            // An old await must not release that latch or consume its handover.
+            if self.queueDrainGeneration == generation {
+                self.queueDrainGeneration = nil
+                self.isDrainingQueue = false
+                // [T-queue-drain-handover] Re-offer only this owner's request.
+                if self.drainRequestedWhileBusy {
+                    self.drainRequestedWhileBusy = false
+                    if self.continuationQueueMayRun(generation: generation) && !self.promptQueue.isEmpty {
+                        self.startDrainIfIdle(reason: "drain-handover")
+                    }
                 }
             }
         }
-        await drainQueuedPromptsInner()
+        await drainQueuedPromptsInner(generation: generation)
+        guard continuationQueueMayRun(generation: generation) else { return }
     }
 
     /// The actual drain loop. Unguarded so its own tail-recursion for late
     /// arrivals (below) doesn't trip the reentrancy guard — that guard only
     /// gates cross-Task duplicate entry, which all goes through the wrapper.
-    private func drainQueuedPromptsInner() async {
-        while !self.userDidCancel && !self.promptQueue.isEmpty {
+    private func drainQueuedPromptsInner(generation: UUID) async {
+        guard continuationQueueMayRun(generation: generation) else { return }
+        while self.continuationQueueMayRun(generation: generation) && !self.userDidCancel && !self.promptQueue.isEmpty {
             guard !ContinuationCoordinator.shared.hasPendingHandoff(for: sessionId) else { break }
             // If the Task itself is cancelled (e.g. user tapped stop), don't
             // consume queue items — resumeQueueAfterCancel() handles them
             // in a fresh Task.
-            guard !Task.isCancelled else {
+            guard self.continuationQueueMayRun(generation: generation) else {
                 logger.info("📨[DRAIN] Task cancelled — leaving \(self.promptQueue.count) prompt(s) in queue")
                 break
             }
@@ -194,8 +232,32 @@ extension AIChatViewModel {
             // is its own turn (older piled-up fires of that job coalesced into
             // it); everything else still drains together as before.
             guard let take = self.planQueueTake(at: .turnEnd) else { break }
-            let queued = self.removeQueueTake(take)
-            guard !queued.isEmpty else { continue }
+            let queued = self.promptQueue.filter { take.deliver.contains($0.id) }
+            guard !queued.isEmpty else { return }
+            let pasteSnapshot = self.pastedTexts.filter { entry in
+                queued.contains { $0.text.contains("[Pasted#\(entry.id)]") }
+            }
+            var queueCommitted = false
+            defer {
+                if !queueCommitted {
+                    for entry in pasteSnapshot where
+                        self.promptQueue.contains(where: { $0.text.contains("[Pasted#\(entry.id)]") }) &&
+                        !self.pastedTexts.contains(where: { $0.id == entry.id }) {
+                        self.pastedTexts.append(entry)
+                    }
+                }
+            }
+            var preparedPastes: [UUID: (modelText: String, storedParts: [ContentPart], liveCardMetas: [AttachmentMeta])] = [:]
+            for prompt in queued where !prompt.text.isEmpty {
+                let consumed = await self.consumePastedDraft(prompt.text, sessionId: self.sessionId ?? "unknown", plannedFileIds: prompt.pastePlan)
+                guard self.continuationQueueMayRun(generation: generation) else { return }
+                preparedPastes[prompt.id] = consumed
+            }
+            guard self.continuationQueueMayRun(generation: generation),
+                  !ContinuationCoordinator.shared.hasPendingHandoff(for: self.sessionId),
+                  self.planQueueTake(at: .turnEnd) == take else { return }
+            queueCommitted = true
+            _ = self.removeQueueTake(take)
             let drainReminder = self.scheduledReminder(for: take, delivered: queued, at: .turnEnd)
             // [T-loop-reminder-scheduled-exempt] A scheduled fire's poll is an
             // expected repeat: don't let it count toward a loop warning.
@@ -256,8 +318,7 @@ extension AIChatViewModel {
                     // literals at the same boundary send() does; files land on
                     // the ids planned at enqueue so the born-with cards stay
                     // valid ([T-paste-live-bubble-card]).
-                    if let consumed = await self.consumePastedDraft(prompt.text, sessionId: sid,
-                                                                   plannedFileIds: prompt.pastePlan) {
+                    if let consumed = preparedPastes[prompt.id] {
                         combinedParts.append(.text(consumed.modelText))
                         drainPastedParts[consumed.modelText] = consumed.storedParts
                         if let chatMsg = self.messages.first(where: { $0.queuedPromptId == prompt.id }) {
@@ -284,19 +345,23 @@ extension AIChatViewModel {
             for msg in self.messages where msg.queuedPromptId.map(queuedIds.contains) == true {
                 msg.historyAnchorId = queueAgentMsg.anchorId
             }
-            if let pid = await self.persistAgentMessage(queueAgentMsg, pastedParts: drainPastedParts), qIdx < self.agentHistory.count {
-                self.agentHistory[qIdx].dbMessageId = pid
-            }
+            let pid = await self.persistAgentMessage(queueAgentMsg, pastedParts: drainPastedParts)
+            guard self.continuationQueueMayRun(generation: generation) else { return }
+            if let pid, qIdx < self.agentHistory.count { self.agentHistory[qIdx].dbMessageId = pid }
 
+            guard self.continuationQueueMayRun(generation: generation) else { return }
             do {
                 try await self.runAgentLoop()
+                guard self.continuationQueueMayRun(generation: generation) else { return }
             } catch is CancellationError {
+                guard self.continuationQueueMayRun(generation: generation) else { return }
                 logger.info("Agent loop (queued-drain) cancelled")
                 self.finishStoppedTurn()
                 // Don't consume remaining queue items — resumeQueueAfterCancel()
                 // will pick them up in a fresh Task.
                 break
             } catch {
+                guard self.continuationQueueMayRun(generation: generation) else { return }
                 let rawDesc = String(describing: error)
                 logger.error("Agent loop (queued-drain) error: \(rawDesc)")
                 if self.turnWasStopped {   // [T-stop-queued-cancel-error]
@@ -342,11 +407,13 @@ extension AIChatViewModel {
 
         // Yield once to let any last-moment enqueuePrompt() calls execute
         await Task.yield()
-        if !Task.isCancelled && !self.userDidCancel && !self.promptQueue.isEmpty {
+        guard self.continuationQueueMayRun(generation: generation) else { return }
+        if !self.userDidCancel && !self.promptQueue.isEmpty {
             logger.info("📨[DRAIN] Late arrivals after yield: \(self.promptQueue.count)")
             // Recurse on the INNER worker (we already hold the reentrancy guard)
             // so late-arrival handling isn't skipped by our own guard.
-            await drainQueuedPromptsInner()
+            await drainQueuedPromptsInner(generation: generation)
+            guard continuationQueueMayRun(generation: generation) else { return }
         }
     }
 
@@ -377,11 +444,38 @@ extension AIChatViewModel {
         turnUsage: TokenUsage,
         at point: QueueDeliveryPoint
     ) async -> QueueInjection {
+        let generation = continuationQueueFence.generation
+        guard continuationQueueMayRun(generation: generation),
+              !ContinuationCoordinator.shared.hasPendingHandoff(for: sessionId) else { return .none }
         // [T-scheduled-preempt] One delivery = one take (QueueDeliveryPlanner):
         // a scheduled fire is its own turn, never merged with other prompts.
         guard let take = planQueueTake(at: point) else { return .none }
-        let queued = removeQueueTake(take)
+        let queued = promptQueue.filter { take.deliver.contains($0.id) }
         guard !queued.isEmpty else { return .none }
+        let pasteSnapshot = pastedTexts.filter { entry in
+            queued.contains { $0.text.contains("[Pasted#\(entry.id)]") }
+        }
+        var queueCommitted = false
+        defer {
+            if !queueCommitted {
+                for entry in pasteSnapshot where
+                    promptQueue.contains(where: { $0.text.contains("[Pasted#\(entry.id)]") }) &&
+                    !pastedTexts.contains(where: { $0.id == entry.id }) {
+                    pastedTexts.append(entry)
+                }
+            }
+        }
+        var preparedPastes: [UUID: (modelText: String, storedParts: [ContentPart], liveCardMetas: [AttachmentMeta])] = [:]
+        for prompt in queued where !prompt.text.isEmpty {
+            let consumed = await consumePastedDraft(prompt.text, sessionId: sessionId ?? "unknown", plannedFileIds: prompt.pastePlan)
+            guard continuationQueueMayRun(generation: generation) else { return .none }
+            preparedPastes[prompt.id] = consumed
+        }
+        guard continuationQueueMayRun(generation: generation),
+              !ContinuationCoordinator.shared.hasPendingHandoff(for: sessionId),
+              planQueueTake(at: point) == take else { return .none }
+        queueCommitted = true
+        _ = removeQueueTake(take)
         let reminder = scheduledReminder(for: take, delivered: queued, at: point)
         // Mark corresponding chat messages as no longer queued (remove dashed border + X)
         let queuedIds = Set(queued.map(\.id))
@@ -420,8 +514,7 @@ extension AIChatViewModel {
             if !prompt.text.isEmpty {
                 // [T-paste-single-split] Same boundary consumption as send();
                 // files land on the enqueue-planned ids ([T-paste-live-bubble-card]).
-                if let consumed = await consumePastedDraft(prompt.text, sessionId: qSid,
-                                                           plannedFileIds: prompt.pastePlan) {
+                if let consumed = preparedPastes[prompt.id] {
                     qCombinedParts.append(.text(consumed.modelText))
                     qPastedParts[consumed.modelText] = consumed.storedParts
                     if let chatMsg = messages.first(where: { $0.queuedPromptId == prompt.id }) {
@@ -475,9 +568,10 @@ extension AIChatViewModel {
         for msg in messages where msg.queuedPromptId.map(queuedIds.contains) == true {
             msg.historyAnchorId = queueMsg.anchorId
         }
-        if let pid = await persistAgentMessage(queueMsg, snapshots: [:], pastedParts: qPastedParts), queueIdx < agentHistory.count {
-            agentHistory[queueIdx].dbMessageId = pid
-        }
+        let pid = await persistAgentMessage(queueMsg, snapshots: [:], pastedParts: qPastedParts)
+        guard continuationQueueMayRun(generation: generation) else { return .none }
+        if let pid, queueIdx < agentHistory.count { agentHistory[queueIdx].dbMessageId = pid }
+        guard continuationQueueMayRun(generation: generation) else { return .none }
         // Cache markdown on the completed assistant message before starting a new one
         if msgIdx < messages.count {
             for i in messages[msgIdx].blocks.indices {

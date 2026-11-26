@@ -130,8 +130,21 @@ extension AIChatViewModel {
         return s
     }
 
-    func cancel() {
-        if let sid = sessionId { ContinuationCoordinator.shared.userStopped(sid) }
+    func cancel(resumeQueuedPrompts: Bool = true) {
+        // Supersede old rescues even for an ordinary Stop; its newly scheduled
+        // rescue below owns the new generation and keeps upstream queue semantics.
+        continuationQueueFence.invalidatePendingWork()
+        idleDrainTask?.cancel()
+        idleDrainTask = nil
+        postCompactDrainPending = false
+        isDrainingQueue = false
+        queueDrainGeneration = nil
+        drainRequestedWhileBusy = false
+        // Install before isProcessing didSet/compact cleanup can schedule rescue.
+        if !resumeQueuedPrompts { stopContinuationQueue() }
+        if resumeQueuedPrompts, let sid = sessionId {
+            ContinuationCoordinator.shared.userStopped(sid, originatingCancel: true)
+        }
         let lastBlocks = (messages.last?.role == .assistant) ? messages.last!.blocks.count : -1
         let lastRole = messages.last.map { $0.role == .assistant ? "assistant" : "user" } ?? "nil"
         logger.info("⏹️ cancel() START session=\(self.sessionId ?? "nil") isProcessing=\(self.isProcessing) lastRole=\(lastRole) lastBlocks=\(lastBlocks) currentTask=\(self.currentTask != nil)")
@@ -244,7 +257,7 @@ extension AIChatViewModel {
             // would delete that prompt's bubble, overwrite the input box with
             // its text, and drop the queue — destroying a message the user is
             // still waiting on.
-            if origin == .beforeSend {
+            if origin == .beforeSend && resumeQueuedPrompts && continuationQueueMayRun {
                 // Restore all queued compact-and-send messages back to input
                 // (use the last one for inputText since it's the most recent)
                 for queued in promptQueue {
@@ -262,7 +275,7 @@ extension AIChatViewModel {
         // If there are queued prompts remaining, spawn a new task to continue
         // processing them. The old task is cancelled (stops the current agent
         // loop) but the queue should keep draining.
-        if !promptQueue.isEmpty && !isCompacting {
+        if resumeQueuedPrompts && continuationQueueMayRun && !promptQueue.isEmpty && !isCompacting {
             logger.info("⏹️ cancel() — \(promptQueue.count) queued prompt(s) remain, restarting drain")
             resumeQueueAfterCancel()
         }

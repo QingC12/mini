@@ -1623,6 +1623,8 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
     // schedulePostCompactDrain() runs the post-compact queue drain on this
     // task so cancel() can stop it. [T-compact-queued-drain]
     var currentTask: Task<Void, Never>?
+    /// Retain idle/rescue ownership so a hard stop cancels even a queued task.
+    var idleDrainTask: Task<Void, Never>?
     var compactTask: Task<Void, Never>?
 
     /// [T-ios-compact-task-binding] Which entry point started the compaction
@@ -1675,6 +1677,8 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
     /// Set by cancel() so the task's error handler knows this was a user stop.
     /// Internal-access so concurrent tool extensions can read it. [T-concurrent-tools]
     var userDidCancel = false
+    /// Ownership/deletion fence survives a new queue-rescue Task clearing cancel.
+    var continuationQueueFence = ContinuationQueueFence()
     /// [T-stop-queued-cancel-error] Whether a turn's error epilogue is looking
     /// at the end of a Stop rather than a real failure.
     ///
@@ -1688,7 +1692,7 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
     /// turn's bubble, whose start-of-turn error sweep already ran, so it never
     /// goes away. `Task.isCancelled` belongs to the stopped task itself and
     /// cannot be reset from outside, so it catches that late error.
-    var turnWasStopped: Bool { userDidCancel || Task.isCancelled }
+    var turnWasStopped: Bool { userDidCancel || Task.isCancelled || !continuationQueueMayRun }
     /// [T-stop-sibling-subagent] Set when the user stops a sub agent from its
     /// card rather than stopping this conversation outright.
     ///
@@ -1775,6 +1779,9 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
     /// atomic and spans the `await runAgentLoop()` suspension where the second
     /// drainer would otherwise slip in. [T-ios-concurrent-stop-double-request]
     var isDrainingQueue = false
+    /// Only this generation may release the drain latch after an await. Stop
+    /// relinquishes it synchronously so an old task cannot block a new owner.
+    var queueDrainGeneration: UUID?
     /// [T-queue-drain-handover] A drain was requested while another task held
     /// `isDrainingQueue`; the holder re-offers it when it releases the guard.
     var drainRequestedWhileBusy = false

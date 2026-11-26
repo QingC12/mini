@@ -21,6 +21,8 @@ import Darwin
     @MainActor static func reset() throws -> ChatStore {
         UserDefaults.standard.set(true, forKey: ContinuationPolicy.settingsKey)
         UserDefaults.standard.removeObject(forKey: "nativeContinuation.stoppedSessions")
+        UserDefaults.standard.removeObject(forKey: "nativeContinuation.deletedSessions")
+        UserDefaults.standard.removeObject(forKey: "nativeContinuation.hardStoppedSessions")
         UserDefaults.standard.removeObject(forKey: "nativeContinuation.invalidatedBefore")
         UserDefaults.standard.removeObject(forKey: "nativeContinuation.policyInvalidatedBefore")
         AIChatViewModel.afterLoad = nil
@@ -268,7 +270,7 @@ import Darwin
     }
 
     @MainActor static func main() async {
-        let keys = [ContinuationPolicy.settingsKey, "nativeContinuation.stoppedSessions", "nativeContinuation.invalidatedBefore",
+        let keys = [ContinuationPolicy.settingsKey, "nativeContinuation.stoppedSessions", "nativeContinuation.deletedSessions", "nativeContinuation.hardStoppedSessions", "nativeContinuation.invalidatedBefore",
                     "nativeContinuation.policyInvalidatedBefore"]
         let saved = keys.map { UserDefaults.standard.object(forKey: $0) }
         defer {

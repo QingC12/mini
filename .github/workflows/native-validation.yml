@@ -17,7 +17,7 @@ jobs:
         with:
           fetch-depth: 2
           persist-credentials: false
-      - name: Compile real Swift checks and parse production feature sources
+      - name: Compile policy, provider, storage, reliability, router and stop checks plus syntax
         run: python3 scripts/ci/run-tests.py
       - uses: actions/upload-artifact@v4
         if: always()

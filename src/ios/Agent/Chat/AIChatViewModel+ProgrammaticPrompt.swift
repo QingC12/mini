@@ -121,10 +121,17 @@ extension AIChatViewModel {
             return .rejected(reason: "session_compacting")
         }
 
+        guard !continuationQueueFence.isDeleted,
+              !ContinuationCoordinator.shared.isDeletedSession(sessionId) else {
+            return .rejected(reason: "session_deleted")
+        }
         if !isProcessing {
             switch origin {
             case .cli, .shortcut, .userAskAnswer:
-                ContinuationCoordinator.shared.userBeganRequest(sessionId)
+                guard ContinuationCoordinator.shared.userBeganRequest(sessionId),
+                      reopenContinuationQueueForExplicitUserRequest() else {
+                    return .rejected(reason: "continuation_stopped")
+                }
             case .job:
                 // A scheduled/helper callback must not silently restart the old
                 // task after ownership has moved. Its caller gets a real refusal.
@@ -135,6 +142,9 @@ extension AIChatViewModel {
                 break
             }
         }
+
+        // Jobs, continuation dispatch, and busy callbacks never reopen a fence.
+        guard continuationQueueMayRun else { return .rejected(reason: "continuation_stopped") }
 
         // [T-programmatic-prompt-no-composer] The prompt travels as an
         // argument, NOT through `inputText`.

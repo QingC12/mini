@@ -79,7 +79,7 @@ jobs:
           set -o pipefail
           python3 scripts/ci/prepare-deps.py 2>&1 | tee "$CI_OUTPUT_DIR/logs/source-provenance.log"
 
-      - name: Run real native continuation Swift tests
+      - name: Run policy, provider, storage, reliability, router and stop checks plus syntax
         run: python3 scripts/ci/run-tests.py
 
       - name: Compute native cache identity

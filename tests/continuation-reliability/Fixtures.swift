@@ -79,6 +79,7 @@ struct QueuedPrompt {
         id = UUID(); self.text = text; self.attachments = attachments
     }
 }
+#if !CONTINUATION_STOP_TESTS
 struct TestUIMessage {
     let id: UUID
     let role: MessageRole
@@ -93,6 +94,9 @@ enum ProgrammaticPromptOrigin { case continuation(recoveryID: String) }
     var helperConfig: String?
     var remoteDeviceId: String?
     var turnWasStopped = false
+    var continuationQueueFence = ContinuationQueueFence()
+    var idleDrainTask: Task<Void, Never>?
+    var drainRequestedWhileBusy = false
     var promptQueue: [QueuedPrompt] = []
     var messages: [TestUIMessage] = []
     var agentHistory: [TestAgentEntry] = []
@@ -102,6 +106,7 @@ enum ProgrammaticPromptOrigin { case continuation(recoveryID: String) }
     var isCompacting = false
     var isLoadingSession = false
     var isDrainingQueue = false
+    var queueDrainGeneration: UUID?
     var postCompactDrainPending = false
     var sessionSource = ""
     var programmaticTurnOrigin: ProgrammaticPromptOrigin?
@@ -127,13 +132,19 @@ enum ProgrammaticPromptOrigin { case continuation(recoveryID: String) }
     func acceptContinuationHandoff(promptIDs: Set<UUID>) {
         promptQueue.removeAll { promptIDs.contains($0.id) }
     }
-    func cancel() { turnWasStopped = true; isProcessing = false }
+    func cancel(resumeQueuedPrompts: Bool = true) {
+        if !resumeQueuedPrompts { stopContinuationQueue() }
+        turnWasStopped = true; isProcessing = false
+    }
     func startDrainIfIdle(reason: String) { drains += 1 }
 }
+
+#endif
 
 @MainActor final class ViewModelCache {
     static let shared = ViewModelCache()
     var cache: [String: AIChatViewModel] = [:]
+    func remove(sessionId: String) { cache.removeValue(forKey: sessionId)?.cancel() }
     func get(for id: String) -> AIChatViewModel? { cache[id] }
     func getOrCreate(for id: String) -> (AIChatViewModel, Bool) {
         if let vm = cache[id] { return (vm, false) }
@@ -143,6 +154,7 @@ enum ProgrammaticPromptOrigin { case continuation(recoveryID: String) }
 @MainActor final class SessionConcurrencyManager {
     static let shared = SessionConcurrencyManager()
     var runningSessions: Set<String> = []
+    func cancelWait(sessionId: String) {}
 }
 @MainActor enum ContinuationWorkspace {
     static var prepareHook: (() async throws -> Void)?

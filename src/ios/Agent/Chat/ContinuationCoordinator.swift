@@ -9,6 +9,8 @@ final class ContinuationCoordinator: ObservableObject {
     @Published private(set) var records: [String: ContinuationRecord] = [:]
     private var workers: [String: Task<Void, Never>] = [:]
     private var stoppedSessions = Set(UserDefaults.standard.stringArray(forKey: "nativeContinuation.stoppedSessions") ?? [])
+    private var hardStoppedSessions = Set(UserDefaults.standard.stringArray(forKey: "nativeContinuation.hardStoppedSessions") ?? [])
+    private var deletedSessions = Set(UserDefaults.standard.stringArray(forKey: "nativeContinuation.deletedSessions") ?? [])
     private var epochs: [String: UUID] = [:]
     private var policyEpoch = UUID()
     private var policyInvalidatedBefore = UserDefaults.standard.double(forKey: "nativeContinuation.policyInvalidatedBefore")
@@ -96,7 +98,7 @@ final class ContinuationCoordinator: ObservableObject {
     /// Called while the old loop still owns its lease. No restore/start here.
     func stage(source: AIChatViewModel, attemptID: String, failure: ConversationTurnLimitFailure) async {
         guard ContinuationPolicy.isEnabled, source.helperConfig == nil, source.remoteDeviceId == nil,
-              !source.turnWasStopped, let sid = source.sessionId, !stoppedSessions.contains(sid) else { return }
+              !source.turnWasStopped, source.continuationQueueMayRun, let sid = source.sessionId, !isDeletedSession(sid), !stoppedSessions.contains(sid) else { return }
         explicitlyReopenedSources.remove(sid)
         stagingSources.insert(sid)
         defer { stagingSources.remove(sid) }
@@ -104,7 +106,7 @@ final class ContinuationCoordinator: ObservableObject {
         let policyVersion = policyEpoch
         func allowed() -> Bool {
             !Task.isCancelled && ContinuationPolicy.isEnabled && policyEpoch == policyVersion && !source.turnWasStopped &&
-                !stoppedSessions.contains(sid) && epochs[sid] == epoch
+                !stoppedSessions.contains(sid) && !isDeletedSession(sid) && source.continuationQueueMayRun && epochs[sid] == epoch
         }
         do {
             let saved = try await ChatStore.shared.continuationRecords(activeOnly: false)
@@ -205,6 +207,7 @@ final class ContinuationCoordinator: ObservableObject {
         guard ContinuationPolicy.isEnabled, !record.state.isTerminal, records[record.id]?.state.isTerminal != true,
               workers[record.id] == nil, !dispatchedInProcess.contains(record.id), !wasInvalidated(record),
               !stoppedSessions.contains(record.sourceSessionID), !stoppedSessions.contains(record.destinationSessionID),
+              !isDeletedSession(record.sourceSessionID), !isDeletedSession(record.destinationSessionID),
               !SessionConcurrencyManager.shared.runningSessions.contains(record.sourceSessionID),
               ViewModelCache.shared.get(for: record.sourceSessionID)?.isProcessing != true,
               ViewModelCache.shared.get(for: record.destinationSessionID)?.isProcessing != true else { return }
@@ -222,6 +225,7 @@ final class ContinuationCoordinator: ObservableObject {
         !Task.isCancelled && ContinuationPolicy.isEnabled && policyEpoch == fence.policyEpoch && records[id]?.state.isTerminal != true &&
             records[id].map { !wasInvalidated($0) } == true &&
             !stoppedSessions.contains(fence.source) && !stoppedSessions.contains(fence.destination) &&
+            !isDeletedSession(fence.source) && !isDeletedSession(fence.destination) &&
             epochs[fence.source] == fence.sourceEpoch && epochs[fence.destination] == fence.destinationEpoch &&
             !SessionConcurrencyManager.shared.runningSessions.contains(fence.source) &&
             ViewModelCache.shared.get(for: fence.source)?.isProcessing != true
@@ -244,7 +248,7 @@ final class ContinuationCoordinator: ObservableObject {
     }
 
     private func ready(_ vm: AIChatViewModel, record: ContinuationRecord, fence: Fence) -> Bool {
-        allowed(record.id, fence: fence) && !vm.isProcessing && !vm.isCompacting && !vm.isLoadingSession &&
+        allowed(record.id, fence: fence) && vm.continuationQueueMayRun && !vm.isProcessing && !vm.isCompacting && !vm.isLoadingSession &&
             !vm.isDrainingQueue && !vm.postCompactDrainPending && vm.remoteDeviceId == nil && vm.helperConfig == nil &&
             vm.promptQueue.isEmpty && !vm.turnWasStopped &&
             !SessionConcurrencyManager.shared.runningSessions.contains(record.destinationSessionID) &&
@@ -399,59 +403,126 @@ final class ContinuationCoordinator: ObservableObject {
         }
     }
 
-    /// Stop follows forward links, including redirected edges, without deleting
-    /// either conversation. Persistent stopped IDs fence a crash before DB pause.
-    func userStopped(_ sessionID: String) {
+    func isDeletedSession(_ sessionID: String?) -> Bool {
+        sessionID.map { deletedSessions.contains($0) } ?? false
+    }
+
+    func isQueueFenced(_ sessionID: String?) -> Bool {
+        sessionID.map { hardStoppedSessions.contains($0) || deletedSessions.contains($0) } ?? false
+    }
+
+    /// All known edges belong to the same physical task, even after a redirect,
+    /// finish or pause. Stopping B must fence A and C as well as descendants.
+    private func connectedSessions(to sessionID: String) -> Set<String> {
+        var pending = [sessionID]
+        var visited: Set<String> = []
+        while let sid = pending.popLast() {
+            guard visited.insert(sid).inserted else { continue }
+            for record in records.values where record.sourceSessionID == sid || record.destinationSessionID == sid {
+                pending.append(record.sourceSessionID)
+                pending.append(record.destinationSessionID)
+            }
+        }
+        return visited
+    }
+
+    /// Called by cancel() BEFORE its side effects. Independent, non-continuation
+    /// Stop retains upstream auto-drain semantics. A linked task is hard-stopped.
+    /// originatingCancel avoids recursively cancelling the VM already in cancel.
+    func userStopped(_ sessionID: String, originatingCancel: Bool = false) {
         guard !cancelling else { return }
         cancelling = true
         defer { cancelling = false }
         let stoppedAt = Date()
-        var queue = [sessionID]
-        var visited: Set<String> = []
-        while let sid = queue.popLast() {
-            guard visited.insert(sid).inserted else { continue }
+        let visited = connectedSessions(to: sessionID)
+        let linked = visited.count > 1 || stagingSources.contains(sessionID)
+        for sid in visited {
             stoppedSessions.insert(sid)
-            invalidatedBefore[sid] = Date().timeIntervalSince1970
+            invalidatedBefore[sid] = max(invalidatedBefore[sid] ?? 0, stoppedAt.timeIntervalSince1970)
             epochs[sid] = UUID()
-            for record in Array(records.values) where record.sourceSessionID == sid || record.destinationSessionID == sid {
-                if record.state == .redirected || !record.state.isTerminal { queue.append(record.destinationSessionID) }
-                guard !record.state.isTerminal else { continue }
-                workers[record.id]?.cancel()
-                var stopped = record
-                stopped.state = .paused
-                stopped.lastError = "Stopped by user or superseded by a new request."
-                records[record.id] = stopped
-                Task { @MainActor in
-                    do {
-                        if let updated = try await ChatStore.shared.transitionContinuation(id: record.id, to: .paused,
-                                error: stopped.lastError) { self.publish(updated) }
-                    } catch { /* Persisted stop fence still prevents restore dispatch. */ }
-                }
-                if record.destinationSessionID != sessionID {
-                    ViewModelCache.shared.get(for: record.destinationSessionID)?.cancel()
+            if linked || isDeletedSession(sid) {
+                hardStoppedSessions.insert(sid)
+                if let vm = ViewModelCache.shared.get(for: sid) {
+                    vm.stopContinuationQueue(deleted: isDeletedSession(sid))
+                    if sid != sessionID || !originatingCancel { vm.cancel(resumeQueuedPrompts: false) }
                 }
             }
         }
-        UserDefaults.standard.set(invalidatedBefore, forKey: "nativeContinuation.invalidatedBefore")
-        UserDefaults.standard.set(Array(stoppedSessions), forKey: "nativeContinuation.stoppedSessions")
-        // Also catches journal rows not yet loaded/in flight in stage().
+        for record in Array(records.values) where visited.contains(record.sourceSessionID) || visited.contains(record.destinationSessionID) {
+            workers[record.id]?.cancel()
+            guard !record.state.isTerminal else { continue }
+            var stopped = record
+            stopped.state = .paused
+            stopped.lastError = "Stopped by user or superseded by a new request."
+            records[record.id] = stopped
+        }
+        persistStopFences()
+        // Only journal work is asynchronous. A later restore/new request changes
+        // the epoch and prevents this old callback from affecting its generation.
+        let versions = Dictionary(uniqueKeysWithValues: visited.map { ($0, epochs[$0]!) })
         Task { @MainActor in
             do {
                 for sid in visited {
+                    guard self.epochs[sid] == versions[sid] else { continue }
                     let paused = try await ChatStore.shared.pauseContinuations(forSessionID: sid,
                         reason: "Stopped by user or superseded by a new request.", createdBefore: stoppedAt)
+                    guard self.epochs[sid] == versions[sid] else { continue }
                     for record in paused { self.publish(record) }
                 }
-            } catch { /* Synchronous epochs and stopped IDs remain fail-closed. */ }
+            } catch { /* Synchronous epochs and persisted fences remain closed. */ }
         }
     }
 
-    func userBeganRequest(_ sessionID: String?) {
-        guard let sessionID else { return }
+    private func persistStopFences() {
+        UserDefaults.standard.set(invalidatedBefore, forKey: "nativeContinuation.invalidatedBefore")
+        UserDefaults.standard.set(Array(stoppedSessions), forKey: "nativeContinuation.stoppedSessions")
+        UserDefaults.standard.set(Array(hardStoppedSessions), forKey: "nativeContinuation.hardStoppedSessions")
+        UserDefaults.standard.set(Array(deletedSessions), forKey: "nativeContinuation.deletedSessions")
+    }
+
+    /// Invoke on MainActor only AFTER the row deletion succeeds. No ordinary
+    /// cancel is needed. Queue contents/attachment source files remain intact.
+    func sessionDeleted(_ sessionID: String) {
+        deletedSessions.insert(sessionID)
+        // Also handles an isolated endpoint not present in any continuation row.
+        if let vm = ViewModelCache.shared.get(for: sessionID) {
+            vm.stopContinuationQueue(deleted: true)
+            vm.cancel(resumeQueuedPrompts: false)
+        }
+        userStopped(sessionID, originatingCancel: true)
+        persistStopFences()
+    }
+
+    /// Invoke synchronously on MainActor after successful backup SQL restoration.
+    /// Old VMs remain permanently fenced, including references held by the UI.
+    /// Evict BEFORE clearing the persisted ID tombstone so old rescues cannot run.
+    /// A restored row is not an explicit request and does not reopen the task.
+    func sessionRestored(_ sessionID: String) {
+        if let vm = ViewModelCache.shared.get(for: sessionID) {
+            vm.stopContinuationQueue(deleted: true)
+            vm.cancel(resumeQueuedPrompts: false)
+        }
+        ViewModelCache.shared.remove(sessionId: sessionID)
+        epochs[sessionID] = UUID()
+        stoppedSessions.insert(sessionID)
+        hardStoppedSessions.insert(sessionID)
+        explicitlyReopenedSources.remove(sessionID)
+        deletedSessions.remove(sessionID)
+        persistStopFences()
+    }
+
+    @discardableResult
+    func userBeganRequest(_ sessionID: String?) -> Bool {
+        guard let sessionID else { return true }
+        guard !isDeletedSession(sessionID),
+              ViewModelCache.shared.get(for: sessionID)?.continuationQueueFence.isDeleted != true else { return false }
         userStopped(sessionID)
         stoppedSessions.remove(sessionID)
+        hardStoppedSessions.remove(sessionID)
         explicitlyReopenedSources.insert(sessionID)
         epochs[sessionID] = UUID()
-        UserDefaults.standard.set(Array(stoppedSessions), forKey: "nativeContinuation.stoppedSessions")
+        let reopened = ViewModelCache.shared.get(for: sessionID)?.reopenContinuationQueueForExplicitUserRequest() ?? true
+        persistStopFences()
+        return reopened
     }
 }

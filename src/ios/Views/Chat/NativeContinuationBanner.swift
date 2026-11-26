@@ -24,7 +24,6 @@ struct NativeContinuationBanner: View {
                     if !record.state.isTerminal || record.state == .redirected {
                         Button("停止续接链", role: .destructive) {
                             coordinator.userStopped(sessionID)
-                            if let vm = ViewModelCache.shared.get(for: sessionID), vm.isProcessing { vm.cancel() }
                         }
                     }
                 }

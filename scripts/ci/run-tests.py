@@ -29,6 +29,19 @@ feature_paths = [
     'Agent/Chat/ContinuationCoordinator.swift',
     'Agent/Chat/ContinuationPolicy.swift',
     'Agent/Chat/ContinuationRecord.swift',
+    'Agent/Chat/ContinuationStorageBindings.swift',
+    'Agent/Chat/ContinuationWorkspace.swift',
+    'Agent/Chat/ContinuationQueueFence.swift',
+    'Agent/Chat/AIChatViewModel+Cancel.swift',
+    'Agent/Chat/AIChatViewModel+Send.swift',
+    'Agent/Chat/AIChatViewModel+ProgrammaticPrompt.swift',
+    'Agent/Chat/AIChatViewModel+Compaction.swift',
+    'Agent/Chat/ChatStore+BackupRestore.swift',
+    'Agent/Chat/ChatStore+Media.swift',
+    'Agent/Chat/ChatStore+SessionDeletion.swift',
+    'Agent/Chat/SessionDeletionSupport.swift',
+    'Agent/ISH/MinisFsRouter.swift',
+    'Views/Chat/NativeContinuationBanner.swift',
     'Providers/ConversationTurnLimit.swift',
     'Providers/LLMError.swift',
     'Providers/OpenAI/OpenAIAgentProvider.swift',
@@ -61,9 +74,11 @@ for name, path in (
     ('continuation-storage', 'tests/run_continuation_storage_tests.sh'),
     ('continuation-reliability', 'tests/run_continuation_reliability_tests.sh'),
     ('continuation-router', 'tests/run_continuation_router_tests.sh'),
+    ('continuation-stop', 'tests/run_continuation_stop_tests.sh'),
 ):
-    if (ROOT / path).is_file():
-        cases.append((name, ['sh', path]))
+    # Required gates in both workflows: a deleted/missing runner must fail,
+    # never silently lower the suite count and let an IPA through.
+    cases.append((name, ['sh', path]))
 suite = ET.Element('testsuite', name='Minis standalone Swift', tests=str(len(cases)))
 failures = 0
 summary = []

@@ -562,23 +562,33 @@ extension AIChatViewModel {
     /// `postCompactDrainPending` dedups the two schedulers; drainQueuedPrompts'
     /// own reentrancy guard stays the last line of defense.
     func schedulePostCompactDrain() {
-        guard !promptQueue.isEmpty else { return }
+        guard continuationQueueMayRun, !Task.isCancelled, !promptQueue.isEmpty else { return }
         guard !postCompactDrainPending else { return }
+        let generation = continuationQueueFence.generation
         postCompactDrainPending = true
         logger.info("[Compact] scheduling post-compact drain — \(self.promptQueue.count) queued prompt(s)")
         currentTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-            defer { self.postCompactDrainPending = false }
+            guard let self, self.continuationQueueMayRun(generation: generation) else { return }
+            defer {
+                if self.continuationQueueFence.generation == generation { self.postCompactDrainPending = false }
+            }
             self.isProcessing = true
             self.beginBackgroundProcessing()
             await self.drainQueuedPrompts()
-            // Stop during the drained run hands state ownership to cancel()
-            // (and possibly a fresh resumeQueueAfterCancel task) — don't
-            // clobber it from the superseded task.
-            guard !Task.isCancelled else { return }
+            // Stop/reopen hands ownership to a different generation.
+            guard self.continuationQueueMayRun(generation: generation) else { return }
             self.isProcessing = false
             self.endBackgroundProcessing()
         }
+    }
+
+    /// A stopped compact may finish after an explicit request/new compact has
+    /// already taken over. It must never reset that owner's processing slot.
+    func finishCompactionState(generation: UUID, wasProcessingOnEntry: Bool) {
+        guard continuationQueueFence.generation == generation else { return }
+        isCompacting = false
+        isProcessing = wasProcessingOnEntry
+        compactTask = nil
     }
 
     /// [T-ios-compact-task-binding] Start a compaction as the session's tracked
@@ -1033,6 +1043,8 @@ extension AIChatViewModel {
     ///   handoff is needed.
     func compactBefore(_ chatMessageId: UUID, includesBoundary: Bool = false,
                         allowDuringProcessing: Bool = false) async {
+        let generation = continuationQueueFence.generation
+        guard continuationQueueMayRun(generation: generation) else { return }
         guard allowDuringProcessing || !isProcessing else {
             logger.info("[Compact] Cannot compact while processing")
             appendSystemInfo("Cannot compact while processing.", icon: "arrow.down.right.and.arrow.up.left")
@@ -1080,6 +1092,7 @@ extension AIChatViewModel {
         // the marker, but we still need to locate the boundary in agentHistory to
         // size the compacted range.
         let allRaw = await ChatStore.shared.loadMessages(sessionId: sessionId)
+        guard continuationQueueMayRun(generation: generation) else { return }
         var firstKeptMessageId: String? = nil
         if let bso = boundaryUIMsg.sourceSortOrder,
            let rawMsg = allRaw.first(where: { $0.sortOrder == bso }) {
@@ -1200,9 +1213,7 @@ extension AIChatViewModel {
         messages.append(statusMsg)
 
         defer {
-            isCompacting = false
-            isProcessing = wasProcessingOnEntry
-            compactTask = nil
+            finishCompactionState(generation: generation, wasProcessingOnEntry: wasProcessingOnEntry)
         }
 
         // Slice to compact. Skip messages already folded by the previous
