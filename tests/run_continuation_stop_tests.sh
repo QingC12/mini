@@ -21,7 +21,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 mkdir -p "$TMP/modules" "$TMP/home"
 python3 "$ROOT/tests/continuation-stop/extract_methods.py" "$ROOT" "$TMP"
-python3 "$ROOT/tests/continuation-storage/extract.py" "$ROOT" "$TMP/lifecycle"
+python3 "$ROOT/tests/continuation-storage/extract.py" "$ROOT" "$TMP/lifecycle" --shared-logger
 "$COMPILER" -swift-version 5 -D CONTINUATION_STOP_TESTS -parse-as-library -module-cache-path "$TMP/modules" \
     "$ROOT/tests/continuation-reliability/Fixtures.swift" \
     "$ROOT/tests/continuation-stop/Adapters.swift" \
